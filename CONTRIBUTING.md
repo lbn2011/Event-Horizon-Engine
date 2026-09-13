@@ -33,6 +33,17 @@
 - 可在本机完成：编译、单元测试、CPU 参考实现与 golden 渲染。
 - 所有"跑起来看"的验证需在目标机执行，PR 中注明由哪台机器验证。
 
+## 任务看板
+
+- 看板：https://github.com/users/lbn2011/projects/2/views/1 （Projects v2，kanban 视图）
+- 列语义：`Backlog` 未开始 → `Ready` 下一步可动手 → `In progress` 进行中 → `In review` 有 PR 待审 → `Done` 已完成
+- 字段：`Priority`（P0 阻塞链路 / P1 v1 必需 / P2 后置）、`Size`（工作量粗估）
+- 约定：
+  1. 每条 issue 对应 TASKS.md 的一个任务组，issue 正文中的验收标准与 TASKS.md 一致；
+  2. 开工时把 issue 移到 `Ready` 再在动手时移到 `In progress`（同时勾选 TASKS.md 子条目）；
+  3. 分支推上来、PR 打开后移到 `In review`；PR 合并且验收通过后移到 `Done`；
+  4. 新建 issue 会自动进入看板 `Backlog`（仓库已启用自动添加），无需手动添加。
+
 ## 网络受限环境的推送备用通道
 
 本机 git over HTTPS 到 `github.com` 曾被代理阻断（`CONNECT tunnel failed, response 502`），
