@@ -38,8 +38,14 @@ jobs:
           $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$env:LLVM_MINGW_TAG/$env:LLVM_MINGW_ASSET"
           Invoke-WebRequest -Uri $url -OutFile llvm-mingw.zip
           7z x llvm-mingw.zip -o"C:\tools" -y | Out-Null
-          Get-ChildItem "C:\tools" | Select-Object Name
-          Test-Path "C:\tools\llvm-mingw\bin\clang++.exe"
+          # 压缩包内层目录带版本号（llvm-mingw-<ver>-ucrt-x86_64），统一改名为约定路径
+          # C:\tools\llvm-mingw —— 与 cmake/llvm-mingw-toolchain.cmake 的默认值一致
+          $extracted = Get-ChildItem "C:\tools" -Directory -Filter "llvm-mingw-*"
+          Write-Host "解压出：$($extracted.FullName)"
+          if (Test-Path "C:\tools\llvm-mingw") { Remove-Item "C:\tools\llvm-mingw" -Recurse -Force }
+          Move-Item $extracted.FullName "C:\tools\llvm-mingw"
+          # 验证编译器存在（早失败、信息明确）
+          & "C:\tools\llvm-mingw\bin\clang++.exe" --version
 
       - name: 配置（Ninja + LLVM-MinGW 工具链）
         shell: pwsh
