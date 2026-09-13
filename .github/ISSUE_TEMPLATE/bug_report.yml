@@ -1,0 +1,85 @@
+name: Bug 报告
+description: 渲染异常、崩溃、物理不正确、构建失败
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: category
+    attributes:
+      label: 问题类别
+      options:
+        - 物理不正确（阴影/红移/聚束/盘亮度异常）
+        - 渲染异常（画面撕裂、鬼影、后处理错误）
+        - 崩溃或无响应
+        - 构建/工具链失败
+        - 性能不达标
+        - UI/交互问题
+    validations:
+      required: true
+
+  - type: textarea
+    id: symptom
+    attributes:
+      label: 现象描述
+      description: 看到什么、与预期差在哪
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 后端 = Vulkan，内部分辨率 = 1.0x
+        2. 自旋 a = 0，N_max = 300
+        3. 观察阴影轮廓
+        附上 ehe.config.json 内容或面板参数截图
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+      description: 有解析依据的请附数值基准（DESIGN §4.4）
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本与后端
+      placeholder: 提交哈希 / v1.0-m1，后端 vulkan
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 日志 / 截图 / NMSE
+      description: 调试视图（steps/classify/g_factor/null_drift，DESIGN §5.5）输出优先
+    validations:
+      required: false
+
+  - type: textarea
+    id: env
+    attributes:
+      label: 环境
+      description: 哪个机器跑出来的（开发机无 GPU，渲染问题必然来自目标机）
+      placeholder: |
+        机器：目标机（GPU 型号）
+        后端：vulkan 1.2 / opengl 4.6
+        精度模式：混合 fp64
+        内部分辨率：1.0x，N_max：300
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: precheck
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 已在调试视图中确认问题不属于"步数用尽"（classify 显示红色区域）
+          required: false
+        - label: 已对照 DESIGN.md 相关小节，确认不是已记录的设计取舍
+          required: true
