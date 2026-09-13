@@ -7,10 +7,15 @@ out/
 ehe.config.json
 imgui.ini
 
-# 验证产物（golden 基线图入库，运行输出不入库）
+# 验证产物：golden 基线**必须入库**（DESIGN §6.4），仅忽略运行期输出
+smoke_*.pfm
+out*.pfm
 *.pfm
+!tests/golden/*.pfm
 smoke_*.png
 out.png
+ehe_test_lut.f32
+ehe_test_config.json
 
 # 工具链本地路径（各人机器不同）
 tools/

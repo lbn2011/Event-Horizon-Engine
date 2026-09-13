@@ -1,7 +1,7 @@
 #pragma once
 
 // EHE render —— 后端无关层信息
-// 脚手架占位：T0.4 起引入 IRenderer 抽象（生命周期/resize/render/参数注入），
+// IRenderer 抽象见 IRenderer.h；本文件只提供后端枚举与名称，
 // 由 render/vk 与 render/gl 各自实现，运行时按 Config.backend 切换（DESIGN §5.2）。
 
 namespace ehe::render {

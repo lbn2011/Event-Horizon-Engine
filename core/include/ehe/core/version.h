@@ -1,9 +1,8 @@
 #pragma once
 
 // EHE core —— 版本与构建信息
-// 说明：本文件属 M0/T0.2 脚手架，用于验证「core 零图形依赖 + 可编译」链路。
-//       Config / Camera / BlackHoleParams / ReferenceIntegrator / BlackbodyLut 等
-//       真实模块在 T1.1 / T1.2 落地（DESIGN §5.1）。
+// 说明：版本与构建信息查询。core 的其余模块（Config / Camera / units / metric /
+//       integrator / blackbody / golden / sha256）已按 DESIGN §5.1 落地。
 
 namespace ehe::core {
 
