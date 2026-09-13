@@ -27,11 +27,15 @@
   - 产出：可配置的空工程
 - [x] T0.2.4 协作设施：issue 模板（bug_report/task）+ PR 模板 + CONTRIBUTING.md 分支策略（dev→PR→main，squash 合并）—— 2026-09-13
 - [x] T0.2.5 本地 `main` 初始提交（设计文档 V5.1 + 任务拆解 + 许可）—— 2026-09-13
-- [ ] T0.2.6 建 `dev` 分支并推送到远端
-- [ ] T0.2.7 GitHub 远程仓库：`lbn2011/Event-Horizon-Engine` 旧仓库（2026-03 旧 C++/Rust 架构，8 commits）已备份快照
-  `Event-Horizon-Engine-legacy-backup.zip`（工作区根目录，91KB），按用户决定删库重建后推送 main/dev
-  - ⚠ 网络阻塞中：git over https 到 github.com 失败（本地代理 127.0.0.1:64633 CONNECT 502），网络恢复后重试
-  - 验收：`gh repo view` 可访问、main/dev 均在远端、首个 PR 按模板合并
+- [x] T0.2.6 建 `dev` 分支 —— 2026-09-13（远端已建并同步至 main）
+- [x] T0.2.7 GitHub 远程仓库：`lbn2011/Event-Horizon-Engine`（Public）
+  - 旧仓库（2026-03 旧 C++/Rust 架构，8 commits）已按用户决定删除；完整克隆备份在
+    `C:\Users\lbn\Desktop\code\Event-Horizon-Engine-legacy-backup`，快照 zip 同目录
+  - 远端内容经 GitHub Git Data API 建立（本机 git push 被代理阻断：sandbox 出口代理对 github.com
+    返回 502，直连超时）。本地已对齐：main = dev = `6a1937a`
+  - 首个 PR：#1（dev → main，squash 合并）—— 2026-09-13 ✅
+  - ⚠ 遗留：网络恢复后验证 `git push origin dev` 可直连；备用 remote `mirror` 指向 gh-proxy 镜像
+    （读通道验证可用，写通道未验证）
 
 ### T0.3 依赖拉通 ⛓T0.2
 - [ ] T0.3.1 `cmake/Deps.cmake`：11 个仓库 FetchContent 声明 + 版本 pin（DESIGN §9）
