@@ -8,6 +8,8 @@ add_executable(ehe_tests
   src/test_main.cpp
   src/test_config.cpp
   src/test_camera.cpp
+  src/test_metric.cpp
+  src/test_integrator.cpp
 )
 
 target_link_libraries(ehe_tests

@@ -1,9 +1,10 @@
-# EHE 任务拆解 V1.7
+# EHE 任务拆解 V1.8
 
 > 执行清单，与 `DESIGN.md`（规格权威）配套使用。冲突时以 DESIGN.md 为准。
 > 每条任务：可勾选状态、验收标准、依赖、产出物。完成后勾 `[x]` 并注明日期。
 > 版本：V1.0（基于 DESIGN.md V5.1 拆出）→ V1.1（协作设施）→ V1.2（看板）→ V1.3（T0.1）
-> → V1.4（T0.2）→ V1.5（T0.3）→ V1.6（T0.4 + GL 能力勘误）→ V1.7（T1.1 core 基础完成，进入物理内核阶段）。
+> → V1.4（T0.2）→ V1.5（T0.3）→ V1.6（T0.4 + GL 能力勘误）→ V1.7（T1.1）
+> → V1.8（T1.2 度规内核/RK4/解析基准完成，精度 1e-9 量级；LUT 与 golden 渲染器待完成）。
 
 图例：🏁 = 里程碑验收门；⛓ = 有前置依赖；产出物用 `代码格式` 标注。
 
@@ -111,20 +112,39 @@
 > 说明：静态 tetrad 当前为「笛卡尔正交基（η 归一化，a=0/远场极限）」，
 > 完整的按 Kerr-Schild 度量 Gram–Schmidt 版本随度规模块在 T1.2 接入，接口保持不变（DESIGN §4.2）。
 
-### T1.2 L1 CPU 参考实现 ⛓T1.1（本阶段最重要，DESIGN §6/L1）
-- [ ] T1.2.1 Kerr-Schild r 求根 + 度规分量（§4.1，fp64）
-  - 测试：`ks_radius_a0`、`ks_metric_a0_limit`
-- [ ] T1.2.2 度规导数链式三层（§4.1.1）+ Christoffel 组装
-  - 测试：`metric_derivative_numeric`（中心差分回归 < 1e-6）
-- [ ] T1.2.3 RK4 积分器 + 自适应步长 + 终止条件（§4.3）
-  - 测试：`rk4_convergence`（4 阶）、`null_norm_init`
-- [ ] T1.2.4 解析基准验证：光子球、b_crit 捕获扫描、阴影半径（§4.4）
-  - 测试：`photon_capture_bc`（3√3 ± 0.5%）
+### T1.2 L1 CPU 参考实现 ⛓T1.1（本阶段最重要，DESIGN §6/L1）—— 进行中（度规内核与解析基准已完成）
+- [x] T1.2.1 Kerr-Schild r 求根 + 度规分量（§4.1，fp64）—— `core/metric.{h,cpp}`
+  - 测试：`ks_radius_a0`（1000 随机点退化欧氏距离）、`ks_radius` 隐式定义满足性（a ∈ {0,0.3,0.7,0.998}）
+  - 测试：`ks_metric_a0_limit`（a=0 精确退化为 Schwarzschild：g_tt=−1+2/r、g_ti=2x_i/r²、g_ij=δ_ij+2x_ix_j/r³）
+- [x] T1.2.2 度规导数链式三层（§4.1.1）+ Christoffel 组装
+  - 测试：`metric_derivative_numeric`（∂r/∂H/∂k 解析 vs 中心差分，rel err < 1e-6，60 点 × 3 轴 × 3 个自旋）
+  - 测试：`christoffel` 后两指标对称性（< 1e-12）
+- [x] T1.2.3 RK4 积分器 + 自适应步长 + 终止条件（§4.3）—— `core/integrator.{h,cpp}`
+  - 测试：`rk4_convergence`（步长减半误差比 ≈16，实测落于 [12,20]）、`null_norm` 全程类光性漂移 < 1e-6（设计验收 1e-3）
+  - 测试：三终止条件（正对中心→Captured、朝外→Escaped、步数用尽→Exhausted）、`adaptive_step` 上下限与单调性
+  - 测试：守恒量漂移（E、L_z 相对漂移 < 1e-7）
+- [x] T1.2.4 解析基准验证：光子球、b_crit 捕获扫描、阴影角（§4.4）
+  - **实测（2026-09-14，fp64）**：
+    - 临界冲击参数 `b_crit = 5.1961524441`，解析 `3√3 = 5.1961524227` → **相对误差 4.1e-09**（设计容差 ±0.5%）
+    - 阴影角（观测者 r=15）`0.32835918 rad` vs 解析 `0.32835918 rad` → **相对误差 2.9e-09**（设计容差 1%）
 - [ ] T1.2.5 黑体 LUT 生成器（§4.5 生成规格）→ `blackbody_lut.f32` + PNG 预览条
   - 测试：`lut_monotonic_peak`、`lut_files_identical`
 - [ ] T1.2.6 golden 渲染器（§6.4）：盘模型 + g 因子 + 体合成（§4.5）→ PFM + PNG
   - 测试：`shadow_radius_image`、`g_factor_monotonic`
 - [ ] T1.2.7 🏁 **L1 门**：§4.4 五项基准全过 + golden PFM 入库 `tests/golden/`
+
+**验收记录（2026-09-14，本轮）**
+- `ehe_tests`：**30 个用例 / 5984 个断言全部通过**（含上轮 T1.1 的 15 用例）
+- 关键：解析基准的数值精度远超设计容差，说明 Kerr-Schild 度规（含逆度规无分母形式）、
+  解析导数链与 Christoffel 组装、RK4 + 自适应步长三者均正确
+- 修复的两个真问题（均由测试暴露）：
+  1. `is_captured` 起点半径 1000 > 逃逸半径 100 → 光线第一步即被判逃逸，二分永不捕获；
+     现按起点距离自动放大逃逸半径并注明该耦合
+  2. 冲击参数带符号（表示绕轴旋转方向），临界值需取模长——否则 b_crit 得到 −5.196 而非 +5.196
+
+> 说明：`photon_capture_bc` 用的是「二分 y₀ + 由守恒量精确计算 b」的方式，
+> 因此结论不受起点半径有限的 O(M/D) 误差影响；光子球半径 3M 由 b_crit = 3√3 M 间接锁定
+> （临界冲击参数与光子球半径在 Schwarzschild 下是同一物理量的两种表述）。
 
 ### T1.3 GLSL 内核移植（GL 先行）⛓T1.2
 - [ ] T1.3.1 `shaders/common/` 四文件（simparams/metric/disk/noise），对照 T1.2 逐行移植
