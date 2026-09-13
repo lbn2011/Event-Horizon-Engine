@@ -50,6 +50,14 @@
 - **处置**：新增 `.github/workflows/ci.yml`——同源 LLVM-MinGW + Ninja → 配置 → 构建 → 全量测试 →
   **LUT 可复现性校验**（重烘焙后 `git diff --exit-code`）→ GL 自检（`continue-on-error`）；
   GPU 渲染刻意不进 CI（§6 边界）。
+- **首次运行又暴露 3 个问题（已全部修复，CI 现已全绿）**：
+  1. 仓库启用了 `sha_pinning_required`，`actions/checkout@v4` 浮动 tag 导致 workflow **startup_failure**
+     → Action 钉到提交 SHA（`@3d3c42e5…  # v7.0.1`）；
+  2. LLVM-MinGW 压缩包内层目录带版本号，直接解压得不到约定路径 `C:\tools\llvm-mingw`
+     → 解压后改名并**立即校验 `clang++.exe` 可执行**（早失败、信息明确）；
+  3. `choco install ninja` 写的是**机器级 PATH**，同一 step 内的 shell 不刷新 → 裸名 `ninja` 找不到，
+     CMake 报出误导性的「CMAKE_CXX_COMPILER not set」→ 改用绝对路径并显式校验。
+  **结论**：CI 首次运行就抓出 3 个真实缺陷，其中第 3 个会直接影响任何新环境的构建复现——正是 §6 L4 的价值所在。
 
 ### 🟡 轻 4：第三方许可与数据来源声明缺失
 
