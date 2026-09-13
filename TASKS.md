@@ -1,9 +1,9 @@
-# EHE 任务拆解 V1.3
+# EHE 任务拆解 V1.4
 
 > 执行清单，与 `DESIGN.md`（规格权威）配套使用。冲突时以 DESIGN.md 为准。
 > 每条任务：可勾选状态、验收标准、依赖、产出物。完成后勾 `[x]` 并注明日期。
-> 版本：V1.0（2026-09-13，基于 DESIGN.md V5.1 拆出）；V1.1（补仓库/协作设施）；V1.2（补看板约定）；
-> V1.3（T0.1 工具链部署完成，记录实测版本/三元组/静态运行时与下载通道）。
+> 版本：V1.0（基于 DESIGN.md V5.1 拆出）；V1.1（补仓库/协作设施）；V1.2（补看板约定）；
+> V1.3（T0.1 工具链完成）；V1.4（T0.2 仓库骨架与 CMake 工程完成，M0 仅剩 T0.3/T0.4）。
 
 图例：🏁 = 里程碑验收门；⛓ = 有前置依赖；产出物用 `代码格式` 标注。
 
@@ -29,22 +29,23 @@
 > 镜像 `https://v4.gh-proxy.org/https://github.com/<o>/<r>/releases/download/<tag>/<asset>` 实测
 > 1.45 MB/s。解压用 Python `zipfile`（`tar.exe`/`curl.exe` 本机缺失，`Add-Type` 被沙箱策略拦截）。
 
-### T0.2 仓库骨架 ⛓T0.1
+### T0.2 仓库骨架 ⛓T0.1 —— ✅ 2026-09-13
 - [x] T0.2.1 `git init` + `LICENSE`（MIT）+ `.gitignore`(build/、.cache/、ehe.config.json、*.pfm) —— 2026-09-13
-- [ ] T0.2.2 按 DESIGN §5.1 建目录骨架（core/render/render/vk/render/gl/app/shaders/tests/cmake）
-- [ ] T0.2.3 顶层 `CMakeLists.txt`：C++20、警告集、选项（EHE_FP64_METRIC 默认 ON）、子目录挂接
-  - 产出：可配置的空工程
-- [x] T0.2.4 协作设施：issue 模板（bug_report/task）+ PR 模板 + CONTRIBUTING.md 分支策略（dev→PR→main，squash 合并）—— 2026-09-13
-- [x] T0.2.5 本地 `main` 初始提交（设计文档 V5.1 + 任务拆解 + 许可）—— 2026-09-13
+- [x] T0.2.2 目录骨架（DESIGN §5.1）—— core/ render/{,vk,gl}/ app/ shaders/ tests/ cmake/ 全部就位，含占位源码
+- [x] T0.2.3 顶层 `CMakeLists.txt`：C++20、警告集（`ehe_warnings`）、选项（`EHE_FP64_METRIC` 默认 ON、
+  `EHE_BUILD_TESTS`）、`ehe_options` 编译期开关、输出目录集中、构建摘要打印
+  - target 依赖实测：`ehe_app → ehe_render_vk / ehe_render_gl → ehe_render → ehe_core`（与 §5.4.1 一致）
+  - **验收通过**：`cmake -G Ninja -DCMAKE_TOOLCHAIN_FILE=... -DCMAKE_MAKE_PROGRAM=C:/tools/ninja/ninja.exe`
+    配置 + 编译 12/12 全绿、零警告；`ehe.exe` 输出
+    `Event Horizon Engine 0.1.0 [fp64_metric=1] / backends compiled: 2 (vulkan, opengl)`；`ehe_tests.exe` 运行正常
+  - 产物：`build/bin/ehe.exe`（1.4MB，静态运行时）、四个静态库
+- [x] T0.2.4 协作设施：issue 模板（bug_report/task）+ PR 模板 + CONTRIBUTING.md 分支策略 —— 2026-09-13
+- [x] T0.2.5 本地 `main` 初始提交 —— 2026-09-13
 - [x] T0.2.6 建 `dev` 分支 —— 2026-09-13（远端已建并同步至 main）
-- [x] T0.2.7 GitHub 远程仓库：`lbn2011/Event-Horizon-Engine`（Public）
-  - 旧仓库（2026-03 旧 C++/Rust 架构，8 commits）已按用户决定删除；完整克隆备份在
-    `C:\Users\lbn\Desktop\code\Event-Horizon-Engine-legacy-backup`，快照 zip 同目录
-  - 远端内容经 GitHub Git Data API 建立（本机 git push 被代理阻断：sandbox 出口代理对 github.com
-    返回 502，直连超时）。本地已对齐：main = dev = `6a1937a`
-  - 首个 PR：#1（dev → main，squash 合并）—— 2026-09-13 ✅
-  - ⚠ 遗留：网络恢复后验证 `git push origin dev` 可直连；备用 remote `mirror` 指向 gh-proxy 镜像
-    （读通道验证可用，写通道未验证）
+- [x] T0.2.7 GitHub 远程仓库：`lbn2011/Event-Horizon-Engine`（Public）—— 2026-09-13
+  - 旧仓库按用户决定删除；完整克隆备份在 `C:\Users\lbn\Desktop\code\Event-Horizon-Engine-legacy-backup`
+  - ⚠ 遗留：git 直连推送受本机代理阻断（502），当前改动经 GitHub API 同步；网络恢复后验证 `git push`
+- [x] T0.2.8 任务看板与 issue 体系（Projects v2，issue #3–#22 + 里程碑 M0–M3）—— 2026-09-13
 
 ### T0.3 依赖拉通 ⛓T0.2
 - [ ] T0.3.1 `cmake/Deps.cmake`：11 个仓库 FetchContent 声明 + 版本 pin（DESIGN §9）
