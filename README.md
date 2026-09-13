@@ -26,9 +26,21 @@
 **M0 进行中**（工具链与仓库骨架）。
 
 - [x] 设计文档 V5.1 / 任务拆解 / 许可 / 协作模板 / GitHub 仓库与分支策略
-- [ ] LLVM-MinGW + Ninja 工具链部署（T0.1）
+- [x] LLVM-MinGW 20260908 + Ninja 1.13.2 工具链部署（T0.1，产物静态链接运行时）
 - [ ] 目录骨架与 CMake 工程（T0.2 余项）
 - [ ] 依赖拉通、空窗口双后端（T0.3 / T0.4）
+
+工具链用法：
+
+```bash
+cmake -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/llvm-mingw-toolchain.cmake \
+  -DCMAKE_MAKE_PROGRAM=C:/tools/ninja/ninja.exe \
+  -B build
+cmake --build build
+```
+
+工具链解压根目录默认 `C:/tools/llvm-mingw`，其他机器用 `-DEHE_LLVM_MINGW_ROOT=...` 覆盖。
 
 开发机无 Vulkan 支持，**GPU 渲染需在目标现代独显机器上验证**；物理正确性由 CPU 参考实现
 （L1）与 golden image 差分在开发机把关。
