@@ -70,6 +70,14 @@
   5. `imgui_impl_vulkan.cpp` 需要 vulkan 头 → Vulkan-Headers/volk 声明前移到 ImGui 之前，并启用 `IMGUI_IMPL_VULKAN_USE_VOLK`
   6. 关闭 `ENABLE_GLSLANG_BINARIES`（运行时用库，不需要 glslang/glslangValidator 工具，省 73MB 产物）
 
+### T0.5 CI 编译检查（DESIGN §6 L4）—— ✅ 2026-09-14（审查发现缺失后补建）
+- [x] `.github/workflows/ci.yml`：同源 LLVM-MinGW + Ninja → 配置 → 构建 → **全量测试（L2 + L1 基准）**
+      → **LUT 可复现性校验**（重烘焙后 `git diff --exit-code`）→ GL 自检（`continue-on-error`）
+- [x] GPU 渲染刻意不进 CI（§6 明确边界）
+- [x] 首次运行抓出并修复 3 个真实缺陷：Action 需钉 SHA（仓库启用 `sha_pinning_required`）、
+      LLVM-MinGW 解压目录改名、choco 的 PATH 在同一步内不生效（ninja 需绝对路径）
+- **验收**：push / PR 触发均 **success**（干净机器上 43 用例 / 34962 断言通过 + LUT 校验通过）
+
 ### T0.4 空窗口双后端 ⛓T0.3
 - [x] T0.4.1 GL 后端：GLFW 窗口 + GL 4.5 core context + glad（`gladLoadGLLoader`）+ ImGui（glfw/opengl3）
 - [x] T0.4.2 Vulkan 后端：volk → instance(1.2) → 物理/逻辑设备 → 自管 swapchain + render pass +

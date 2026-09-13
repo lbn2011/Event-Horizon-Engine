@@ -1,0 +1,88 @@
+name: CI
+
+# 规格依据：DESIGN §6 L4 —— 无 GPU runner：编译 + L1/L2 + LUT 一致性校验；GPU 渲染永不进 CI
+#
+# 说明：
+#   - 使用与开发机**同一版本**的 LLVM-MinGW 压缩包（§9.1「CI 同源」），禁止本地新版、CI 旧版
+#   - L1（CPU 参考实现）与 L2（doctest）都在 CPU 上运行，可在 CI 覆盖
+#   - L3（目标机冒烟、PFM 差分）依赖 GPU，**刻意不进 CI**（DESIGN §6 明确的边界）
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  LLVM_MINGW_TAG: "20260908"
+  LLVM_MINGW_ASSET: "llvm-mingw-20260908-ucrt-x86_64.zip"
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 检出代码
+        # 本仓库开启了 Actions 的「要求固定 SHA」（Settings → Actions），
+        # 浮动 tag（如 @v4）会导致 workflow startup_failure，故此处钉到 v7.0.1 的提交 SHA。
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 安装 Ninja
+        run: choco install ninja --no-progress -y
+
+      - name: 定位 Ninja（choco 写的是机器级 PATH，同一步内不刷新，故用绝对路径）
+        id: ninja
+        shell: pwsh
+        run: |
+          $candidates = @("C:\ProgramData\chocolatey\bin\ninja.exe", "C:\ProgramData\chocolatey\lib\ninja\tools\ninja.exe")
+          $ninja = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $ninja) { throw "未找到 ninja.exe，候选路径：$($candidates -join ', ')" }
+          Write-Host "ninja = $ninja"
+          & $ninja --version
+          "path=$ninja" >> $env:GITHUB_OUTPUT
+
+      - name: 下载并解压 LLVM-MinGW（与开发机同版本）
+        shell: pwsh
+        run: |
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$env:LLVM_MINGW_TAG/$env:LLVM_MINGW_ASSET"
+          Invoke-WebRequest -Uri $url -OutFile llvm-mingw.zip
+          7z x llvm-mingw.zip -o"C:\tools" -y | Out-Null
+          # 压缩包内层目录带版本号（llvm-mingw-<ver>-ucrt-x86_64），统一改名为约定路径
+          # C:\tools\llvm-mingw —— 与 cmake/llvm-mingw-toolchain.cmake 的默认值一致
+          $extracted = Get-ChildItem "C:\tools" -Directory -Filter "llvm-mingw-*"
+          Write-Host "解压出：$($extracted.FullName)"
+          if (Test-Path "C:\tools\llvm-mingw") { Remove-Item "C:\tools\llvm-mingw" -Recurse -Force }
+          Move-Item $extracted.FullName "C:\tools\llvm-mingw"
+          # 验证编译器存在（早失败、信息明确）
+          & "C:\tools\llvm-mingw\bin\clang++.exe" --version
+
+      - name: 配置（Ninja + LLVM-MinGW 工具链）
+        shell: pwsh
+        run: |
+          # 全部使用绝对路径：工具链文件与 ninja 都以绝对路径传入，
+          # 避免相对路径解析差异与本 step 内 PATH 未刷新导致的「找不到编译器/生成器」。
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/cmake/llvm-mingw-toolchain.cmake" `
+            -DEHE_LLVM_MINGW_ROOT=C:/tools/llvm-mingw `
+            -DCMAKE_MAKE_PROGRAM="${{ steps.ninja.outputs.path }}"
+
+      - name: 构建
+        shell: pwsh
+        run: cmake --build build
+
+      - name: L2 单元测试 + L1 解析基准（doctest 全量）
+        shell: pwsh
+        run: build/bin/ehe_tests.exe
+
+      - name: LUT 可复现性校验（重烘焙后与仓库内两份拷贝一致）
+        shell: pwsh
+        run: |
+          build/bin/ehe_reftool.exe lut
+          git diff --exit-code -- tests/golden/blackbody_lut.f32 shaders/blackbody_lut.f32
+
+      - name: 冒烟：GL 后端自检（CI runner 无独显，允许失败但不隐藏结果）
+        shell: pwsh
+        continue-on-error: true
+        run: build/bin/ehe.exe --try-backends
