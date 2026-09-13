@@ -25,7 +25,9 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        # 本仓库开启了 Actions 的「要求固定 SHA」（Settings → Actions），
+        # 浮动 tag（如 @v4）会导致 workflow startup_failure，故此处钉到 v7.0.1 的提交 SHA。
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: 安装 Ninja
         run: choco install ninja --no-progress -y
