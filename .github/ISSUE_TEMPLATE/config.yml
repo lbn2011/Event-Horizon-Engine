@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 设计规格（唯一权威来源）
+    url: https://github.com/lbn2011/Event-Horizon-Engine/blob/main/DESIGN.md
+    about: 提问或改动前先查 DESIGN.md；与其冲突的需求一律以文档为准
+  - name: 任务拆解
+    url: https://github.com/lbn2011/Event-Horizon-Engine/blob/main/TASKS.md
+    about: 查看 M0–M3 的完整任务清单与门禁

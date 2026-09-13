@@ -1,0 +1,63 @@
+name: 开发任务
+description: 拆解自 TASKS.md 的实现任务，或新的实现工作项
+title: "[任务] "
+labels: ["task"]
+body:
+  - type: input
+    id: task_id
+    attributes:
+      label: 对应任务号
+      description: TASKS.md 中的条目编号；新增工作项请写"新增"
+      placeholder: T1.2.3
+    validations:
+      required: true
+
+  - type: input
+    id: design_ref
+    attributes:
+      label: 规格依据（DESIGN.md 节号）
+      description: 本任务遵循的规格小节，实现中出现歧义以此为准
+      placeholder: §4.3 测地线积分
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: 范围与产出物
+      description: 要做什么、产出哪些文件或库
+      placeholder: |
+        实现 RK4 积分器 + 距离自适应步长 + 三个终止条件
+        产出：core/integrator.{h,cpp}、ehe_tests 中新增用例
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收标准
+      description: 可客观判定的条件，禁止"看起来对"这类表述
+      placeholder: |
+        - rk4_convergence 用例通过（误差 ÷16）
+        - photon_capture_bc 通过（3√3 ± 0.5%）
+    validations:
+      required: true
+
+  - type: input
+    id: depends
+    attributes:
+      label: 前置依赖
+      description: 依赖的任务号或条件；无则填"无"
+      placeholder: 依赖 T1.2.2
+
+  - type: dropdown
+    id: verify_machine
+    attributes:
+      label: 验证位置
+      description: 开发机（HD 7400M，无 Vulkan）无法运行 GPU 渲染
+      options:
+        - 开发机（CPU/单元测试）
+        - 目标机（需 GPU 运行）
+        - 两者都要
+    validations:
+      required: true

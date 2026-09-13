@@ -1,0 +1,17 @@
+# 统一换行：仓库内一律 LF，检出时按平台
+* text=auto eol=lf
+
+# Windows 专用脚本保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制（禁止换行转换与 diff）
+*.png binary
+*.jpg binary
+*.pfm binary
+*.f32 binary
+*.zip binary
+
+# 生成物/参考资料不做语言统计
+shaders/post_fsr1_*.glsl linguist-vendored
+third_party/** linguist-vendored
