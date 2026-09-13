@@ -44,6 +44,23 @@
   3. 分支推上来、PR 打开后移到 `In review`；PR 合并且验收通过后移到 `Done`；
   4. 新建 issue 会自动进入看板 `Backlog`（仓库已启用自动添加），无需手动添加。
 
+## 仓库安全设置（2026-09-13 配置）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| main 分支规则集 `main-protection` | ✅ 启用 | 禁止删除、禁止强推、要求线性历史、**必须经 PR 合入**（0 名批准即可，审查意见线程需解决） |
+| Secret scanning | ✅ 启用 | 公开仓库免费 |
+| Push protection | ✅ 启用 | 推送含密钥内容时被拦截 |
+| Dependabot 漏洞告警 | ✅ 启用 | 依赖漏洞自动提示 |
+| Dependabot 安全更新 | ✅ 启用 | 自动提 PR 修复已知漏洞 |
+| 私密漏洞报告（Private vulnerability reporting） | ✅ 启用 | 外部研究者可私密提交漏洞 |
+| CodeQL 默认配置（c-cpp） | ✅ 启用 | 首次分析已通过；后续每次推送/按计划运行 |
+| Actions 权限 | ✅ 收紧 | 仅允许 GitHub 官方与已验证的 Action，且要求提交固定 SHA；`GITHUB_TOKEN` 默认只读 |
+| Secret scanning 非provider模式 / 有效性校验 | ⏳ 待授权 | API 接受请求但静默忽略，需 token 具备 `security_events` scope<br>`gh auth refresh -h github.com -s security_events` |
+
+**约束提醒**：`main` 已被规则集保护，**任何绕过 PR 的直接推送/强制推送都会被拒绝**——包括脚本直接改
+`refs/heads/main`。改动一律走 `dev` 分支 → PR → squash 合并（与本地/API 同步流程一致）。
+
 ## 网络受限环境的推送备用通道
 
 本机 git over HTTPS 到 `github.com` 曾被代理阻断（`CONNECT tunnel failed, response 502`），
