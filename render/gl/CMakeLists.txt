@@ -12,6 +12,7 @@ target_include_directories(ehe_render_gl PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/inc
 
 target_link_libraries(ehe_render_gl
   PUBLIC ehe_render
+  PRIVATE ehe_glad                # GL 4.5 核心加载器（third_party/glad，生成入库）
   PRIVATE ehe_warnings
   PRIVATE ehe_options
 )

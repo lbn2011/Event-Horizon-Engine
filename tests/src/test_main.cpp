@@ -1,17 +1,29 @@
-// EHE 测试入口（脚手架）
+// EHE 测试入口 —— doctest 主程序
 //
-// 现状：doctest 于 T0.3 经 FetchContent 接入；本文件当前仅做最小自检并返回 0，
-//       以保证 ehe_tests 目标在骨架阶段即可编译运行。
-//
-// 后续：T0.3 引入 doctest 后，本文件改为 DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN，
-//       用例按 DESIGN §6.5 清单逐个加入（r 求根 a=0 退化、RK4 收敛阶、b_crit 捕获阈值…）。
+// T0.3：doctest 经 FetchContent 接入，本文件改用 DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN。
+// 真实用例按 DESIGN §6.5 清单随模块落地（T1.1 起）：config_roundtrip、
+// camera_tetrad_orthonormal、ks_radius_a0、metric_derivative_numeric、rk4_convergence、
+// photon_capture_bc、shadow_radius_image、null_norm_init、g_factor_monotonic、
+// lut_monotonic_peak、lut_files_identical …
 
-#include <iostream>
+#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include <doctest/doctest.h>
+
+#include <string>
 
 #include "ehe/core/version.h"
 
-int main() {
-    std::cout << "[ehe_tests] scaffold, no cases yet (doctest 接入见 T0.3)\n";
-    std::cout << "[ehe_tests] core version=" << ehe::core::version_string() << "\n";
-    return 0;
+TEST_CASE("core: 版本与构建开关可查询") {
+    const std::string version = ehe::core::version_string();
+    CHECK_FALSE(version.empty());
+
+    const std::string flags = ehe::core::build_flags();
+    CHECK_FALSE(flags.empty());
+    // 编译期开关须与 CMake 选项一致（EHE_FP64_METRIC 默认 ON，DESIGN §4.3）
+    CHECK(flags.rfind("fp64_metric=", 0) == 0);
+}
+
+TEST_CASE("core: 测试基础设施可用（doctest 接入自检）") {
+    const int dummy = 0;
+    CHECK(dummy == 0);
 }

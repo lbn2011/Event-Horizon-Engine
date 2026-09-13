@@ -1,9 +1,9 @@
-# EHE 任务拆解 V1.4
+# EHE 任务拆解 V1.5
 
 > 执行清单，与 `DESIGN.md`（规格权威）配套使用。冲突时以 DESIGN.md 为准。
 > 每条任务：可勾选状态、验收标准、依赖、产出物。完成后勾 `[x]` 并注明日期。
 > 版本：V1.0（基于 DESIGN.md V5.1 拆出）；V1.1（补仓库/协作设施）；V1.2（补看板约定）；
-> V1.3（T0.1 工具链完成）；V1.4（T0.2 仓库骨架与 CMake 工程完成，M0 仅剩 T0.3/T0.4）。
+> V1.3（T0.1 工具链完成）；V1.4（T0.2 完成）；V1.5（T0.3 依赖拉通完成，M0 仅剩 T0.4）。
 
 图例：🏁 = 里程碑验收门；⛓ = 有前置依赖；产出物用 `代码格式` 标注。
 
@@ -47,12 +47,27 @@
   - ⚠ 遗留：git 直连推送受本机代理阻断（502），当前改动经 GitHub API 同步；网络恢复后验证 `git push`
 - [x] T0.2.8 任务看板与 issue 体系（Projects v2，issue #3–#22 + 里程碑 M0–M3）—— 2026-09-13
 
-### T0.3 依赖拉通 ⛓T0.2
-- [ ] T0.3.1 `cmake/Deps.cmake`：11 个仓库 FetchContent 声明 + 版本 pin（DESIGN §9）
-- [ ] T0.3.2 逐个验证编译：GLFW → GLM → ImGui(含3后端文件) → glad → Vulkan-Headers+volk →
-  glslang → miniaudio → doctest → nlohmann/json → FSR1 头文件 → stb
-  - 验收：全部 target 编译通过；遇 clang-mingw 摩擦记录现象（DESIGN §12 风险行）
-- [ ] T0.3.3 FSR1 与 stb 头文件入库路径确定（非 FetchContent 的手动 vendored 项写进 Deps.cmake 注释）
+### T0.3 依赖拉通（11 个仓库）⛓T0.2 —— ✅ 2026-09-13
+- [x] `cmake/Deps.cmake`：11 个仓库 FetchContent 声明 + 版本 pin
+  - glfw 3.5.1 / glm 1.0.3 / imgui v1.92.9 / Vulkan-Headers + volk + glslang = vulkan-sdk-1.4.357.0 /
+    doctest v2.5.3 / nlohmann-json v3.12.0 / miniaudio 0.11.25 / FSR1 v1.0.2 / stb（提交 pin）
+- [x] 逐个验证编译：全部通过（详见下方验收记录）
+- [x] glad 生成入库：`third_party/glad`（`glad --profile core --api gl=4.5 --generator c`；注册表经本地服务注入）
+- [x] FSR1/stb/miniaudio 按头文件使用；ImGui 三后端文件（glfw + opengl3 + vulkan）编译进 `ehe_imgui`
+
+**验收记录（2026-09-13）**
+- 配置：11/11 依赖拉取完成（首次配置 713s），`-DFETCHCONTENT_BASE_DIR=<持久目录>` 使依赖跨 build 复用（缓存放 `C:\Users\lbn\Downloads\ehe-deps`，213.6MB）
+- 构建：**54/54 target 全部成功**，`libglslang.a`、`libehe_imgui.a`、`libglfw3.a`、`libglad.a`、`libvolk.a`、`libminiaudio.a`、`libdoctest_with_main.a` 等全部产出
+- 运行：`ehe.exe` 正常；`ehe_tests.exe` **doctest 2.5.3，2 用例 / 4 断言全通过**
+- 踩坑与修复（均已写入 Deps.cmake 注释与 CONTRIBUTING）：
+  1. **FetchContent 子进程不读仓库级 .git/config** → 镜像改写须用 `GIT_CONFIG_*` 环境变量注入
+  2. **CMake 默认执行 `git submodule update`，而本机 Git shell 脚本不可用** → 全部依赖 `GIT_SUBMODULES ""`；
+     经查 glslang 新版已自带 `SPIRV/spirv.hpp11` 且 `ENABLE_OPT=OFF`，确实无需子模块
+  3. **glslang 在未指定构建类型时默认 Debug** → 产出 `libglslangd.a`，与空配置的 `libglslang.a` 不匹配；
+     顶层显式设默认 `CMAKE_BUILD_TYPE=RelWithDebInfo`
+  4. `glslang::SPIRV` 在 `ENABLE_OPT=OFF` 下是空壳库 → 不链接（glslang 主库已含 SPIRV 源码）
+  5. `imgui_impl_vulkan.cpp` 需要 vulkan 头 → Vulkan-Headers/volk 声明前移到 ImGui 之前，并启用 `IMGUI_IMPL_VULKAN_USE_VOLK`
+  6. 关闭 `ENABLE_GLSLANG_BINARIES`（运行时用库，不需要 glslang/glslangValidator 工具，省 73MB 产物）
 
 ### T0.4 空窗口双后端 ⛓T0.3
 - [ ] T0.4.1 GLFW 窗口 + GL 4.5 context + ImGui 空面板（GL 路径）

@@ -10,6 +10,7 @@ add_executable(ehe_tests
 
 target_link_libraries(ehe_tests
   PRIVATE ehe_core
+  PRIVATE doctest::doctest
   PRIVATE ehe_warnings
   PRIVATE ehe_options
 )
