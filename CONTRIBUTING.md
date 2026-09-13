@@ -44,6 +44,66 @@
   3. 分支推上来、PR 打开后移到 `In review`；PR 合并且验收通过后移到 `Done`；
   4. 新建 issue 会自动进入看板 `Backlog`（仓库已启用自动添加），无需手动添加。
 
+## 仓库安全设置（2026-09-13 配置）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| main 分支规则集 `main-protection` | ✅ 启用 | 禁止删除、禁止强推、要求线性历史、**必须经 PR 合入**（0 名批准即可，审查意见线程需解决） |
+| Secret scanning | ✅ 启用 | 公开仓库免费 |
+| Push protection | ✅ 启用 | 推送含密钥内容时被拦截 |
+| Dependabot 漏洞告警 | ✅ 启用 | 依赖漏洞自动提示 |
+| Dependabot 安全更新 | ✅ 启用 | 自动提 PR 修复已知漏洞 |
+| 私密漏洞报告（Private vulnerability reporting） | ✅ 启用 | 外部研究者可私密提交漏洞 |
+| CodeQL 默认配置（c-cpp） | ✅ 启用 | 首次分析已通过；后续每次推送/按计划运行 |
+| Actions 权限 | ✅ 收紧 | 仅允许 GitHub 官方与已验证的 Action，且要求提交固定 SHA；`GITHUB_TOKEN` 默认只读 |
+| Secret scanning 非provider模式 / 有效性校验 | ⏳ 待授权 | API 接受请求但静默忽略，需 token 具备 `security_events` scope<br>`gh auth refresh -h github.com -s security_events` |
+
+**约束提醒**：`main` 已被规则集保护，**任何绕过 PR 的直接推送/强制推送都会被拒绝**——包括脚本直接改
+`refs/heads/main`。改动一律走 `dev` 分支 → PR → squash 合并（与本地/API 同步流程一致）。
+
+## 依赖与生成物（复现要点）
+
+### FetchContent 依赖
+
+全部第三方依赖在 `cmake/Deps.cmake` 声明并按 tag pin，配置时自动拉取到 `build/_deps/`。
+网络受限环境用仓库级镜像改写（只改本地 `.git/config`，不提交）：
+
+```bash
+git config url."https://v4.gh-proxy.org/https://github.com/".insteadOf "https://github.com/"
+```
+
+`glslang` 只拉取必需子模块（`External/SPIRV-Headers`）；`ENABLE_OPT=OFF` 以避免构建 SPIRV-Tools。
+
+### 为何所有依赖都设 `GIT_SUBMODULES ""`
+
+当前依赖集**不需要任何子模块**，而本机 Git 的 shell 辅助脚本不可用
+（`git-submodule` 依赖的 `basename`/`sed`/`git-sh-setup` 在该环境下缺失），
+CMake 默认执行的子模块更新会让配置阶段直接失败。因此 `cmake/Deps.cmake` 里统一写入
+`GIT_SUBMODULES ""`。两点说明：
+
+- `glslang`（vulkan-sdk-1.4.357.0）已自带 `SPIRV/spirv.hpp11`，且本项目 `ENABLE_OPT=OFF`
+  不需 SPIRV-Tools，故确实无需子模块；
+- 若将来引入确需子模块的依赖，先修复 Git shell 环境（让 `C:\Program Files\Git\usr\bin`
+  与 `mingw64\libexec\git-core` 可用），再对那个依赖单独指定 `GIT_SUBMODULES`。
+
+### glad（GL 加载器，生成文件入库）
+
+`third_party/glad/` 为生成产物，已入库（DESIGN §9「生成文件入库」）。需要重新生成时：
+
+```bash
+# 1) 生成器（隔离 venv）
+python -m venv <venv> && <venv>/Scripts/pip install glad
+# 2) glad 会从 Khronos raw 地址取 gl.xml / khrplatform.h；
+#    网络受限时先经镜像下载这两个文件，再用本地 HTTP 服务 + 改写 spec API 地址喂给 glad
+#    （可用脚本见 tools/gen_glad.py 的说明注释）
+# 3) 生成
+<venv>/Scripts/python -m glad --profile core --api gl=4.5 \
+  --out-path third_party/glad --generator c
+```
+
+生成结果：`include/glad/glad.h`、`include/KHR/khrplatform.h`、`src/glad.c`。
+**注意**：`--api` 语法是 `gl=4.5`（不是 `gl:core=4.5`），profile 用 `--profile core` 单独指定。
+
 ## 网络受限环境的推送备用通道
 
 本机 git over HTTPS 到 `github.com` 曾被代理阻断（`CONNECT tunnel failed, response 502`），

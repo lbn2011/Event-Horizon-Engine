@@ -13,6 +13,11 @@ target_include_directories(ehe_render_vk PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/inc
 
 target_link_libraries(ehe_render_vk
   PUBLIC ehe_render
+  PRIVATE volk                    # 运行时加载 vulkan-1.dll（免 SDK，§5.4.1）
+  PRIVATE Vulkan::Headers
+  PRIVATE glslang::glslang        # GLSL → SPIR-V（启动时编译，§5.2）
+  # 说明：不链接 glslang::SPIRV —— ENABLE_OPT=OFF 时该库仅为空壳（stub），
+  #       glslang 主库自身已包含 ${SPIRV_SOURCES}，运行时编译只需 glslang 即可。
   PRIVATE ehe_warnings
   PRIVATE ehe_options
 )

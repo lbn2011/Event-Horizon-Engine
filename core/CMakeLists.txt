@@ -15,6 +15,8 @@ target_include_directories(ehe_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
 target_compile_definitions(ehe_core PRIVATE "EHE_VERSION_STRING=\"${PROJECT_VERSION}\"")
 
 target_link_libraries(ehe_core
+  PUBLIC glm::glm                  # 数学（header-only）
+  PUBLIC nlohmann_json::nlohmann_json  # Config 序列化（DESIGN §8.1）
   PRIVATE ehe_warnings
   PRIVATE ehe_options
 )

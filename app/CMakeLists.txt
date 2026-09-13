@@ -15,6 +15,11 @@ target_link_libraries(ehe_app
   PRIVATE ehe_render
   PRIVATE ehe_render_vk
   PRIVATE ehe_render_gl
+  PRIVATE glfw                    # 窗口/输入
+  PRIVATE ehe_imgui               # 面板 + 左上角监控 overlay（§5.1 Ui）
+  PRIVATE ehe_miniaudio           # 程序化音效（§5.7）
+  PRIVATE ehe_stb                 # PNG 写出（smoke 预览，§6.3）
+  PRIVATE ehe_fsr1                # FSR1 EASU/RCAS（§4.6）
   PRIVATE ehe_warnings
   PRIVATE ehe_options
 )

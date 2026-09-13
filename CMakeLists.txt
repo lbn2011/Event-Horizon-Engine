@@ -21,6 +21,16 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# ---- 构建类型（必须显式，否则依赖与本项目配置不一致）---------------------
+# 教训：glslang 在其 CMakeLists 中对未指定情形默认 Debug，会加 "d" 后辍
+# （产出 libglslangd.a），而本项目空配置产出 libglslang.a，链接时找不到文件。
+# 统一在此指定默认构建类型，CI 与本地保持一致。
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING "构建类型：Debug/Release/RelWithDebInfo/MinSizeRel" FORCE)
+  set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
+endif()
+message(STATUS "EHE 构建类型: ${CMAKE_BUILD_TYPE}")
+
 # ---- 输出目录：产物集中，便于目标机拷贝调试 --------------------------------
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
@@ -37,8 +47,8 @@ if(EHE_FP64_METRIC)
 endif()
 
 # ---- 依赖（第三方）---------------------------------------------------------
-# FetchContent 依赖统一在 cmake/Deps.cmake 声明并 pin 版本（DESIGN §9），
-# 于 T0.3 接入；当前骨架不依赖任何第三方库即可编译。
+# FetchContent 依赖统一在 cmake/Deps.cmake 声明并 pin 版本（DESIGN §9）
+include(cmake/Deps.cmake)
 
 # ---- 子目录（依赖方向：app → render_{vk,gl} → render → core）-------------
 add_subdirectory(core)
