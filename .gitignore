@@ -5,6 +5,7 @@ out/
 
 # 运行期文件（DESIGN §8.1：Config 持久化）
 ehe.config.json
+imgui.ini
 
 # 验证产物（golden 基线图入库，运行输出不入库）
 *.pfm
