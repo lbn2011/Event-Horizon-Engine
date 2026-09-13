@@ -16,6 +16,8 @@ target_link_libraries(ehe_render_vk
   PRIVATE volk                    # 运行时加载 vulkan-1.dll（免 SDK，§5.4.1）
   PRIVATE Vulkan::Headers
   PRIVATE glslang::glslang        # GLSL → SPIR-V（启动时编译，§5.2）
+  PRIVATE glfw                    # 窗口以 GLFW_NO_API 创建，surface 由 GLFW 提供
+  PRIVATE ehe_imgui               # 面板后端：imgui_impl_vulkan（配合 volk）
   # 说明：不链接 glslang::SPIRV —— ENABLE_OPT=OFF 时该库仅为空壳（stub），
   #       glslang 主库自身已包含 ${SPIRV_SOURCES}，运行时编译只需 glslang 即可。
   PRIVATE ehe_warnings

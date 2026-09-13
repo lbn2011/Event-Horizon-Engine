@@ -1,9 +1,10 @@
-# EHE 任务拆解 V1.5
+# EHE 任务拆解 V1.6
 
 > 执行清单，与 `DESIGN.md`（规格权威）配套使用。冲突时以 DESIGN.md 为准。
 > 每条任务：可勾选状态、验收标准、依赖、产出物。完成后勾 `[x]` 并注明日期。
 > 版本：V1.0（基于 DESIGN.md V5.1 拆出）；V1.1（补仓库/协作设施）；V1.2（补看板约定）；
-> V1.3（T0.1 工具链完成）；V1.4（T0.2 完成）；V1.5（T0.3 依赖拉通完成，M0 仅剩 T0.4）。
+> V1.3（T0.1 工具链完成）；V1.4（T0.2 完成）；V1.5（T0.3 依赖拉通完成）；
+> V1.6（T0.4 双后端实现完成，GL 路径开发机验证通过；并记录开发机 GL 4.5 能力勘误）。
 
 图例：🏁 = 里程碑验收门；⛓ = 有前置依赖；产出物用 `代码格式` 标注。
 
@@ -70,10 +71,22 @@
   6. 关闭 `ENABLE_GLSLANG_BINARIES`（运行时用库，不需要 glslang/glslangValidator 工具，省 73MB 产物）
 
 ### T0.4 空窗口双后端 ⛓T0.3
-- [ ] T0.4.1 GLFW 窗口 + GL 4.5 context + ImGui 空面板（GL 路径）
-- [ ] T0.4.2 volk 初始化 + Vulkan 1.2 instance/device + swapchain + ImGui 空面板（VK 路径）
-- [ ] T0.4.3 `IRenderer` 空实现 ×2 + 工厂 + 窗口句柄销毁重建切换（DESIGN §5.2）
-- [ ] T0.4.4 🏁 **M0 验收**：目标机上 GL/VK 各起一次空窗口、面板后端切换不崩（人工确认）
+- [x] T0.4.1 GL 后端：GLFW 窗口 + GL 4.5 core context + glad（`gladLoadGLLoader`）+ ImGui（glfw/opengl3）
+- [x] T0.4.2 Vulkan 后端：volk → instance(1.2) → 物理/逻辑设备 → 自管 swapchain + render pass +
+  framebuffer → 命令缓冲/同步（2 帧并行）→ ImGui（`imgui_impl_vulkan`，配合 volk）
+- [x] T0.4.3 `IRenderer` 抽象 + app 层工厂 + 面板下拉切换（销毁窗口句柄 → 新后端重建，进程不退）；
+  尺寸自适应由各后端在 `begin_frame` 内处理（GL 重设 viewport；VK 重建交换链），最小化时跳帧
+- [x] T0.4.4 运行参数：`--backend` / `--width` / `--height` / `--vsync` / `--frames=N`（限帧）/
+  `--try-backends`（后端自检）
+
+**验收记录（2026-09-14）**
+- 构建：11/11 全绿（`ehe.exe` 链接双后端）
+- **开发机运行验证（GL 路径）**：`--try-backends` → `opengl => OK`，`GL_VERSION=4.5.13399 Core Profile`、
+  `GL_RENDERER=AMD Radeon HD 7400M Series`；`--frames=2` 跑通窗口 + ImGui 面板 + 渲染循环并正常退出
+- **重要环境勘误（已同步 DESIGN V5.2）**：开发机 GL 能力**实测为 4.5 核心**，非文档原判的 ≤4.1
+  → GL 路径运行时验证可在开发机完成；Vulkan 因缺 `vulkan-1.dll`（无 ICD）仍需目标机
+- 单元测试：doctest 2 用例 / 4 断言全通过
+- ⏳ 待办（目标机）：`--backend=vk` 起窗、面板内 GL↔VK 切换不崩、窗口几何保留 —— 🏁 M0 门禁待此确认
 
 ---
 

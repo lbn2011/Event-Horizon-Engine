@@ -6,6 +6,7 @@
 
 add_executable(ehe_app
   src/main.cpp
+  src/backend_factory.cpp
 )
 
 set_target_properties(ehe_app PROPERTIES OUTPUT_NAME "ehe")

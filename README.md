@@ -29,7 +29,19 @@
 - [x] LLVM-MinGW 20260908 + Ninja 1.13.2 工具链部署（T0.1，产物静态链接运行时）
 - [x] 目录骨架与 CMake 工程（T0.2）
 - [x] 依赖拉通：11 个 FetchContent 仓库全部编译通过（T0.3）
-- [ ] 空窗口双后端（T0.4）
+- [x] 空窗口双后端：GL 4.5 与 Vulkan 1.2 实现 + 运行时切换（T0.4；GL 路径已在开发机验证，Vulkan 待目标机）
+
+**环境实测更正**：开发机显卡（AMD Radeon HD 7400M）**支持 OpenGL 4.5 核心**，
+因此 GL 路径可在本机直接运行验证；Vulkan 因系统无 `vulkan-1.dll` 仍需目标机（详见 DESIGN §2.1）。
+
+运行方式：
+
+```bash
+build/bin/ehe.exe                    # 默认 GL 后端
+build/bin/ehe.exe --backend=vk       # Vulkan 后端
+build/bin/ehe.exe --try-backends     # 探测各后端可用性（自检）
+build/bin/ehe.exe --frames=120       # 渲染 120 帧后退出（自动化验证）
+```
 
 构建与运行：
 
