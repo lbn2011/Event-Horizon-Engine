@@ -46,7 +46,7 @@ struct BlackHoleConfig {
     double disk_r_in = 6.0;          ///< 盘内半径（M=1；a=0 时 = ISCO）
     double disk_r_out = 20.0;        ///< 盘外半径（M=1）
     double disk_density = 1.0;       ///< 归一化盘密度（进入通量剖面）
-    double disk_t_scale = 1.0;       ///< 盘温标定 T_scale
+    double disk_t_scale = 10000.0;   ///< 盘温标定 T_scale（单位 K；峰值温度，进入黑体 LUT 前需有物理量级）
     double disk_kappa = 2.0;         ///< 吸收系数 κ（§4.5 体合成，建议默认 2）
 };
 

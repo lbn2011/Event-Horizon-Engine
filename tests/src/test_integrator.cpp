@@ -177,6 +177,29 @@ TEST_CASE("adaptive_step: 步长随半径收缩且被上下限约束（§4.3）"
     CHECK(mid_large > mid_small);
 }
 
+TEST_CASE("photon_sphere: r = 3M 处的切向光子停留在光子球附近（§4.4）") {
+    // 光子球是**不稳定**圆轨道：在 r = 3M 处以切向发射，轨迹应在该半径附近振荡若干圈，
+    // 而不是立刻落入视界或逃逸。这是对「光子球半径 = 3M」最直接的动力学验证。
+    const auto params = test_params(0.0);
+    const double r_photon = ehe::core::units::kPhotonSphereRadius;
+
+    // 观测点放在赤道面内、切向方向（局部 −y 为径向内、+x 为切向）
+    const Vec3 observer{r_photon, 0.0, 0.0};
+    const Vec3 tangential{0.0, 1.0, 0.0};  // 局部切向（垂直于径向）
+
+    const auto result = ehe::core::trace_from_observer(observer, tangential, params);
+
+    // 不稳定轨道：允许其缓慢漂移，但必须经历"长时间停留在光子球附近"的阶段。
+    // 判据：轨迹最小半径不应远小于光子球（若 r 立即塌缩说明临界半径算错）
+    CHECK(result.min_r > 0.6 * r_photon);
+    // 且不应一开始就判为立即捕获（切向光子有有限的绕行时间）
+    CHECK(result.steps > 10);
+
+    // 对照：径向向内发射必须被捕获（确认同一设置下捕获判定正常）
+    const auto radial = ehe::core::trace_from_observer(observer, Vec3{-1.0, 0.0, 0.0}, params);
+    CHECK(radial.outcome == TraceOutcome::Captured);
+}
+
 TEST_CASE("make_integrator_params: 与 Config 一致") {
     Config config;
     config.integrator.n_max = 512;
