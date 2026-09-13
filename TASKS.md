@@ -1,10 +1,10 @@
-# EHE 任务拆解 V1.8
+# EHE 任务拆解 V1.9
 
 > 执行清单，与 `DESIGN.md`（规格权威）配套使用。冲突时以 DESIGN.md 为准。
 > 每条任务：可勾选状态、验收标准、依赖、产出物。完成后勾 `[x]` 并注明日期。
 > 版本：V1.0（基于 DESIGN.md V5.1 拆出）→ V1.1（协作设施）→ V1.2（看板）→ V1.3（T0.1）
 > → V1.4（T0.2）→ V1.5（T0.3）→ V1.6（T0.4 + GL 能力勘误）→ V1.7（T1.1）
-> → V1.8（T1.2 度规内核/RK4/解析基准完成，精度 1e-9 量级；LUT 与 golden 渲染器待完成）。
+> → V1.8（T1.2 度规内核/RK4/解析基准）→ V1.9（T1.2 全部完成：黑体 LUT + golden 渲染器 + L1 门）。
 
 图例：🏁 = 里程碑验收门；⛓ = 有前置依赖；产出物用 `代码格式` 标注。
 
@@ -112,7 +112,7 @@
 > 说明：静态 tetrad 当前为「笛卡尔正交基（η 归一化，a=0/远场极限）」，
 > 完整的按 Kerr-Schild 度量 Gram–Schmidt 版本随度规模块在 T1.2 接入，接口保持不变（DESIGN §4.2）。
 
-### T1.2 L1 CPU 参考实现 ⛓T1.1（本阶段最重要，DESIGN §6/L1）—— 进行中（度规内核与解析基准已完成）
+### T1.2 L1 CPU 参考实现 ⛓T1.1（本阶段最重要，DESIGN §6/L1）—— ✅ 2026-09-14（L1 门通过）
 - [x] T1.2.1 Kerr-Schild r 求根 + 度规分量（§4.1，fp64）—— `core/metric.{h,cpp}`
   - 测试：`ks_radius_a0`（1000 随机点退化欧氏距离）、`ks_radius` 隐式定义满足性（a ∈ {0,0.3,0.7,0.998}）
   - 测试：`ks_metric_a0_limit`（a=0 精确退化为 Schwarzschild：g_tt=−1+2/r、g_ti=2x_i/r²、g_ij=δ_ij+2x_ix_j/r³）
@@ -127,11 +127,22 @@
   - **实测（2026-09-14，fp64）**：
     - 临界冲击参数 `b_crit = 5.1961524441`，解析 `3√3 = 5.1961524227` → **相对误差 4.1e-09**（设计容差 ±0.5%）
     - 阴影角（观测者 r=15）`0.32835918 rad` vs 解析 `0.32835918 rad` → **相对误差 2.9e-09**（设计容差 1%）
-- [ ] T1.2.5 黑体 LUT 生成器（§4.5 生成规格）→ `blackbody_lut.f32` + PNG 预览条
-  - 测试：`lut_monotonic_peak`、`lut_files_identical`
-- [ ] T1.2.6 golden 渲染器（§6.4）：盘模型 + g 因子 + 体合成（§4.5）→ PFM + PNG
-  - 测试：`shadow_radius_image`、`g_factor_monotonic`
-- [ ] T1.2.7 🏁 **L1 门**：§4.4 五项基准全过 + golden PFM 入库 `tests/golden/`
+- [x] T1.2.5 黑体 LUT 生成器（§4.5 生成规格）—— `core/blackbody.{h,cpp}` + `core/cie1931_2deg.h`
+  - CMF 数据：CIE 1931 2° @1nm（380–780，401 点），由 `tests/tools/gen_cie1931_header.py` 从
+    BSD-3 项目提取并生成常量头；抽样校验 380/555/600 nm 与 CIE 公布值一致
+  - LUT：256 点对数等距 [1000, 40000] K，二进制 `blackbody_lut.f32`（magic+count+float32×3）
+  - **两份拷贝 SHA-256 实测一致**：`c95b51c58a33a2d5121702c9733a07dcc02f1216739e163424298b76c0acc136`（tests/golden 与 shaders）
+  - 测试：`lut_monotonic_peak`（Wien 位移 + 红蓝比单调）、`lut_files_identical`、LUT 往返读写、越界钳制
+- [x] T1.2.6 golden 渲染器（§6.4）—— `core/golden.{h,cpp}` + 工具 `ehe_reftool`
+  - 盘体渲染（中点采样，抑制层状伪影）+ 无扭矩通量剖面 + 黑体色温 + g 因子（引力+多普勒，强度 g³、色温 g·T）
+  - 三终止条件 + 调试视图（shaded / classify / g_factor）；PFM（差分基准）+ PNG（Reinhard 预览）输出
+  - 测试：`shadow_radius_image`（图像测量 vs 解析 **0.245%**）、`g_factor_monotonic`（范围 [0.51, 1.46] 跨越 1）、
+    shaded 非零且无 NaN、类光漂移 1.15e-08
+- [x] T1.2.7 🏁 **L1 门**：§4.4 五项基准全过 + golden PFM 入库 `tests/golden/`
+  - 五项：光子球（直接动力学验证：r=3M 切向光子停留 ≥10 步且最小半径 >0.6·r₊）、阴影半径（图像 0.245%）、
+    ISCO 常量（6M）、g 因子（单调/跨 1）、类光归一化（1.15e-08 ≪ 1e-3）
+  - golden 基线：`tests/golden/golden.pfm`（512², 3.07 MB）+ `golden.png` 预览
+  - **渲染过程中暴露并修正 4 处规格缺口 → DESIGN 升 V5.4**（见文档版本行）
 
 **验收记录（2026-09-14，本轮）**
 - `ehe_tests`：**30 个用例 / 5984 个断言全部通过**（含上轮 T1.1 的 15 用例）

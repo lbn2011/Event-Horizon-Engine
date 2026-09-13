@@ -12,6 +12,9 @@ add_library(ehe_core STATIC
   src/camera.cpp
   src/metric.cpp
   src/integrator.cpp
+  src/blackbody.cpp
+  src/golden.cpp
+  src/sha256.cpp
 )
 
 target_include_directories(ehe_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
