@@ -32,6 +32,17 @@ jobs:
       - name: 安装 Ninja
         run: choco install ninja --no-progress -y
 
+      - name: 定位 Ninja（choco 写的是机器级 PATH，同一步内不刷新，故用绝对路径）
+        id: ninja
+        shell: pwsh
+        run: |
+          $candidates = @("C:\ProgramData\chocolatey\bin\ninja.exe", "C:\ProgramData\chocolatey\lib\ninja\tools\ninja.exe")
+          $ninja = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $ninja) { throw "未找到 ninja.exe，候选路径：$($candidates -join ', ')" }
+          Write-Host "ninja = $ninja"
+          & $ninja --version
+          "path=$ninja" >> $env:GITHUB_OUTPUT
+
       - name: 下载并解压 LLVM-MinGW（与开发机同版本）
         shell: pwsh
         run: |
@@ -50,10 +61,12 @@ jobs:
       - name: 配置（Ninja + LLVM-MinGW 工具链）
         shell: pwsh
         run: |
+          # 全部使用绝对路径：工具链文件与 ninja 都以绝对路径传入，
+          # 避免相对路径解析差异与本 step 内 PATH 未刷新导致的「找不到编译器/生成器」。
           cmake -S . -B build -G Ninja `
-            -DCMAKE_TOOLCHAIN_FILE=cmake/llvm-mingw-toolchain.cmake `
+            -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/cmake/llvm-mingw-toolchain.cmake" `
             -DEHE_LLVM_MINGW_ROOT=C:/tools/llvm-mingw `
-            -DCMAKE_MAKE_PROGRAM=ninja
+            -DCMAKE_MAKE_PROGRAM="${{ steps.ninja.outputs.path }}"
 
       - name: 构建
         shell: pwsh
