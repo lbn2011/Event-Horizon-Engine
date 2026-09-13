@@ -1,0 +1,24 @@
+# 构建产物
+build/
+out/
+.cache/
+
+# 运行期文件（DESIGN §8.1：Config 持久化）
+ehe.config.json
+
+# 验证产物（golden 基线图入库，运行输出不入库）
+*.pfm
+smoke_*.png
+out.png
+
+# 工具链本地路径（各人机器不同）
+tools/
+
+# 编辑器
+.vs/
+.vscode/
+*.user
+
+# 系统
+Thumbs.db
+Desktop.ini
