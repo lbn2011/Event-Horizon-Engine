@@ -14,9 +14,18 @@ out.png
 # 工具链本地路径（各人机器不同）
 tools/
 
+# 助手/本地会话数据：记忆文件、缓存、临时工作区——一律不入库
+.workbuddy/
+**/.workbuddy/
+memory/
+*.memory.md
+CLAUDE.md
+.cursorrules
+
 # 编辑器
 .vs/
 .vscode/
+.trae/
 *.user
 
 # 系统

@@ -1,8 +1,9 @@
-# EHE 任务拆解 V1.1
+# EHE 任务拆解 V1.3
 
 > 执行清单，与 `DESIGN.md`（规格权威）配套使用。冲突时以 DESIGN.md 为准。
 > 每条任务：可勾选状态、验收标准、依赖、产出物。完成后勾 `[x]` 并注明日期。
-> 版本：V1.0（2026-09-13，基于 DESIGN.md V5.1 拆出）；V1.1（2026-09-13，补 T0.2 仓库/协作设施与远端任务，勾选已完成项）。
+> 版本：V1.0（2026-09-13，基于 DESIGN.md V5.1 拆出）；V1.1（补仓库/协作设施）；V1.2（补看板约定）；
+> V1.3（T0.1 工具链部署完成，记录实测版本/三元组/静态运行时与下载通道）。
 
 图例：🏁 = 里程碑验收门；⛓ = 有前置依赖；产出物用 `代码格式` 标注。
 
@@ -10,15 +11,23 @@
 
 ## M0 — 工具链与骨架（DESIGN §10/M0，验收：空窗口双后端可编译）
 
-### T0.1 工具链部署（DESIGN §9.1）
-- [ ] T0.1.1 下载 `llvm-mingw-<ver>-ucrt-x86_64.zip`（mstorsjo/llvm-mingw Releases），解压 `C:\tools\llvm-mingw`
-  - 验收：`C:\tools\llvm-mingw\bin\clang++ --version` 输出含 `x86_64-w64-mingw32`
-- [ ] T0.1.2 下载 `ninja-win.zip`，解压 `C:\tools\ninja`
-  - 验收：`C:\tools\ninja\ninja.exe --version` 有输出
-- [ ] T0.1.3 编写 `cmake/llvm-mingw-toolchain.cmake`（绝对路径引用编译器，不污染 PATH；版本号写入注释）
-  - 产出：`cmake/llvm-mingw-toolchain.cmake`
-- [ ] T0.1.4 空 CMake 项目用 `-G Ninja -DCMAKE_TOOLCHAIN_FILE=...` 配置+编译通过
-  - 验收：hello world 可执行文件运行成功
+### T0.1 工具链部署（DESIGN §9.1）—— ✅ 2026-09-13
+- [x] T0.1.1 下载 `llvm-mingw-20260908-ucrt-x86_64.zip`（190,677,197 字节），解压 `C:\tools\llvm-mingw`
+  - 实测：`clang version 23.1.1`；`clang -dumpmachine` → `x86_64-w64-windows-gnu`
+    （与 `x86_64-w64-mingw32` 等价，验收口径按实测三元组）
+- [x] T0.1.2 下载 `ninja-win.zip`（v1.13.2），解压 `C:\tools\ninja`；`ninja --version` → 1.13.2
+- [x] T0.1.3 编写 `cmake/llvm-mingw-toolchain.cmake`
+  - 绝对路径引用编译器（`EHE_LLVM_MINGW_ROOT` 可覆盖），不污染 PATH
+  - **新增 `EHE_STATIC_RUNTIME`（默认 ON）**：llvm-mingw 默认动态链接 libc++，直接运行报
+    `0xC0000135`；改静态后产物仅依赖系统 DLL（KERNEL32 + UCRT），可拷贝到目标机直接运行
+- [x] T0.1.4 空 CMake 项目全链路验证通过（探针工程，非仓库源码）
+  - `cmake -G Ninja -DCMAKE_TOOLCHAIN_FILE=... -DCMAKE_MAKE_PROGRAM=C:/tools/ninja/ninja.exe`
+  - 编译 + 链接 + 运行均通过；探针覆盖 concepts/constexpr、libc++ 容器、cmath、异常
+  - 实测输出：`cpp_std=202002`、`libcxx=230101`
+
+> 下载通道记录（网络受限时复用）：gh 直连 release 下载在本机极慢/卡死（约 1MB/min）；
+> 镜像 `https://v4.gh-proxy.org/https://github.com/<o>/<r>/releases/download/<tag>/<asset>` 实测
+> 1.45 MB/s。解压用 Python `zipfile`（`tar.exe`/`curl.exe` 本机缺失，`Add-Type` 被沙箱策略拦截）。
 
 ### T0.2 仓库骨架 ⛓T0.1
 - [x] T0.2.1 `git init` + `LICENSE`（MIT）+ `.gitignore`(build/、.cache/、ehe.config.json、*.pfm) —— 2026-09-13
