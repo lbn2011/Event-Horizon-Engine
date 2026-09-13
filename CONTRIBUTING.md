@@ -112,8 +112,16 @@ python -m venv <venv> && <venv>/Scripts/pip install glad
 1. **换 SSL 后端**：`git config http.sslBackend openssl`（默认 schannel 在代理链路上握手失败）。
 2. **gh-proxy 镜像**（已配置为 `mirror` remote，读通道已验证）：
    `git fetch mirror "+refs/heads/main:refs/remotes/mirror/main"`。
-3. **GitHub API 直连**（`gh api` 通常不受影响）：必要时用 Git Data API 创建 blob/tree/commit 再
-   `PATCH /git/refs/heads/<branch>` 更新分支；注意 Trees API 请求字段名是 `tree` 而非 `items`，
-   且空仓库禁止直接创建 blob——先经 Contents API 建根提交。
+3. **GitHub API 直连**（`gh api` 通常不受影响）：必要时用 Git Data API 造提交。**必须按下列顺序，缺一不可**：
+   1. 对 `git ls-tree -r HEAD` 的每个条目检查 blob 是否存在于服务端（`GET /git/blobs/<sha>`），
+      **缺失的先补传**（否则建树会因引用不存在的对象而失败）；
+   2. 用**完整条目**（含 `mode`，注意 `100755` 等）`POST /git/trees`（**不要**用 `base_tree` 增量方式）；
+   3. **核对远端树 SHA 与本地 `git rev-parse HEAD^{tree}` 一致**——这是唯一能拦住「静默丢文件」的检查；
+   4. `POST /git/commits`（parent = 远端 tip）→ `PATCH /git/refs/heads/<branch>`；
+   5. 本地用 `git fetch mirror` 取回远端提交，再 `git reset --hard <远端 sha>` 对齐。
+
+   > 教训（2026-09-14 审查）：早期使用「`git diff --name-only` 取变更文件 + `base_tree`」的增量做法，
+   > **静默丢弃过 `tests/CMakeLists.txt`**，导致全新克隆无法配置构建，且本地毫无察觉。
+   > 第 3 步的树哈希核对已固化为流程，任何偏差立刻暴露。
 4. 恢复正常后务必确认本地与远端一致：`git fetch origin && git status`；不一致时以远端为准重置。
 
