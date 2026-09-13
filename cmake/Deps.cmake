@@ -214,6 +214,8 @@ endif()
 add_library(ehe_glad STATIC "${EHE_GLAD_DIR}/src/glad.c")
 target_include_directories(ehe_glad SYSTEM PUBLIC "${EHE_GLAD_DIR}/include")
 target_link_libraries(ehe_glad PRIVATE ehe_warnings)
+# 第三方生成代码不参与本项目的告警策略（不修改上游产物，整体抑制告警）
+target_compile_options(ehe_glad PRIVATE -w)
 
 # ---------------------------------------------------------------------------
 # 依赖摘要
