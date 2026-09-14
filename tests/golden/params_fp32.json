@@ -1,0 +1,11 @@
+{
+  "//": "shader↔CPU 同参数对照用（小尺寸，规避老 GPU 的 fp64 性能与 TDR 限制）；golden 基线见 params.json",
+  "image": { "width": 128, "height": 128 },
+  "render": { "backend": "gl", "mode": "raymarch", "res_scale": 1.0, "fsr1": false, "fxaa": false, "fps_cap": 0, "debug_view": "shaded" },
+  "blackhole": { "mass": 1.0, "spin": 0.0, "disk_r_in": 6.0, "disk_r_out": 20.0, "disk_density": 1.0, "disk_t_scale": 10000.0, "disk_kappa": 2.0 },
+  "integrator": { "n_max": 200, "h0": 0.05, "h_min": 0.001, "h_max": 0.5, "precision": "fp32" },
+  "particle": { "count": 1000, "size": 1.0, "velocity_profile": "kepler", "enabled": false },
+  "post": { "aces": false, "exposure": 1.0, "chrom_ab": 0.0 },
+  "audio": { "volume": 0.0, "muted": true },
+  "camera": { "mode": "orbit", "fov_deg": 40.0, "dist": 30.0, "azim_deg": 0.0, "polar_deg": 75.0 }
+}

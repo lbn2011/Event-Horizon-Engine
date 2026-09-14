@@ -1,13 +1,16 @@
 #pragma once
 
 // EHE render —— 后端无关层信息
-// IRenderer 抽象见 IRenderer.h；本文件只提供后端枚举与名称，
-// 由 render/vk 与 render/gl 各自实现，运行时按 Config.backend 切换（DESIGN §5.2）。
+//
+// 后端枚举的**唯一来源是 core::Backend**（因为它是 Config 的字段类型，而 core 不能依赖 render）；
+// 这里只做别名，避免两个枚举定义需要来回转换（DESIGN §8.1 渲染组）。
+
+#include "ehe/core/config.h"
 
 namespace ehe::render {
 
-/// 后端枚举（与 DESIGN §8 渲染组「后端(Vulkan/OpenGL)」对应）
-enum class Backend { Vulkan, OpenGL };
+/// 后端枚举（同 core::Backend，见 DESIGN §8 渲染组「后端(Vulkan/OpenGL)」）
+using Backend = core::Backend;
 
 /// 后端名称（用于日志与监控 overlay）
 const char* backend_name(Backend backend);

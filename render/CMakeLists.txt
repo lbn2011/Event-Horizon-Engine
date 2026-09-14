@@ -1,12 +1,16 @@
 # render —— 后端无关的渲染抽象层
-# 内容规划（DESIGN §5.1）：
-#   IRenderer.h   渲染器抽象接口（生命周期/resize/render/参数注入）
-#   ShaderSource  共享 GLSL 450 源码与 C++ 侧 include 展开（§5.8）
-#   PostChain     FSR1 / FXAA / ACES / 色差 的声明与参数（实现由各后端自带）
-# 当前为脚手架占位；IRenderer 接口与后端实现见 T0.4 / T1.3 / T1.6。
+# 内容（DESIGN §5.1）：
+#   IRenderer.h   渲染器抽象接口（生命周期 / 参数注入 / HDR 回读）
+#   ShaderSource  GLSL 450 文本 include 展开与加载（§5.8）
+#   SimParams     UBO 的 C++ 镜像（§5.3，std140）
+#   PostChain     FSR1 / FXAA / ACES / 色差 的声明与参数（T1.5）
+#
+# 依赖方向：ehe_render → ehe_core（单向）；具体后端（gl/vk）→ ehe_render。
 
 add_library(ehe_render STATIC
   src/renderer_info.cpp
+  src/shader_source.cpp
+  src/sim_params.cpp
 )
 
 target_include_directories(ehe_render PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
