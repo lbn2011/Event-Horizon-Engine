@@ -1,10 +1,10 @@
-# EHE 任务拆解 V1.9
+# EHE 任务拆解 V1.10
 
 > 执行清单，与 `DESIGN.md`（规格权威）配套使用。冲突时以 DESIGN.md 为准。
 > 每条任务：可勾选状态、验收标准、依赖、产出物。完成后勾 `[x]` 并注明日期。
 > 版本：V1.0（基于 DESIGN.md V5.1 拆出）→ V1.1（协作设施）→ V1.2（看板）→ V1.3（T0.1）
 > → V1.4（T0.2）→ V1.5（T0.3）→ V1.6（T0.4 + GL 能力勘误）→ V1.7（T1.1）
-> → V1.8（T1.2 度规内核/RK4/解析基准）→ V1.9（T1.2 全部完成：黑体 LUT + golden 渲染器 + L1 门）。
+> → V1.8（T1.2 度规内核/RK4/解析基准）→ V1.9（T1.2 完成）→ V1.10（T1.3 GLSL 移植完成，shader↔CPU NMSE=1.6e-4）。
 
 图例：🏁 = 里程碑验收门；⛓ = 有前置依赖；产出物用 `代码格式` 标注。
 
@@ -165,12 +165,25 @@
 > 因此结论不受起点半径有限的 O(M/D) 误差影响；光子球半径 3M 由 b_crit = 3√3 M 间接锁定
 > （临界冲击参数与光子球半径在 Schwarzschild 下是同一物理量的两种表述）。
 
-### T1.3 GLSL 内核移植（GL 先行）⛓T1.2
-- [ ] T1.3.1 `shaders/common/` 四文件（simparams/metric/disk/noise），对照 T1.2 逐行移植
-- [ ] T1.3.2 ShaderSource 文本 include 展开器（§5.8 约定）
-- [ ] T1.3.3 fullscreen triangle + raymarch.frag 主循环 + UBO 上传（§5.3 布局）
-- [ ] T1.3.4 调试视图 5 种（§5.5）——先用 `classify` 和 `steps` 自查积分器行为
-- [ ] T1.3.5 🏁 GL 后端阴影轮廓肉眼对齐 golden PNG（开发机不可跑 → 目标机执行）
+### T1.3 GLSL 内核移植（GL 先行）⛓T1.2 —— ✅ 2026-09-14（shader↔CPU 数值一致性已验；肉眼对齐待目标机）
+- [x] T1.3.1 `shaders/common/` 四文件（simparams/metric/disk/noise）+ `fullscreen.vert`/`raymarch.frag`/`present.frag`，
+      对照 T1.2 逐行移植；5 种调试视图在 shader 内实现（§5.5）
+- [x] T1.3.2 ShaderSource 文本 include 展开器（§5.8 约定）+ `insert_defines_after_version`（精度宏注入，按 `#version` 行定位）
+- [x] T1.3.3 fullscreen triangle + raymarch.frag 主循环 + UBO 上传（§5.3 布局 + V5.5 的 extras 槽）
+      + FP16 FBO（内部分辨率 = 渲染尺寸 × res_scale）+ 黑体 LUT 纹理（unit 1）+ 呈现 pass
+- [x] T1.3.4 调试视图 5 种（§5.5）：shaded / steps / classify / g_factor / null_drift（面板下拉切换）
+- [x] T1.3.5 **shader 静态校验（无需 GPU）**：glslang 解析展开后的源码，mixed 与 fp32 两种精度都要过
+      → 已进 CI（§6 L4 的"GPU 渲染永不进 CI"与"shader 错误必须早暴露"由此兼容）
+- [x] T1.3.6 **shader↔CPU 数值一致性（本机 GL 4.5）**：同参数（32², n_max=60）双侧渲染后差分
+      → **NMSE = 1.63e-04**（阈值 1e-3）**通过**；CPU 侧 512² 基线可**逐位复现**（NMSE = 0）
+- [ ] T1.3.7 ⏳ 目标机：512² 抹烟与 golden 差分（含 fp64 路径）+ 肉眼对齐 golden PNG
+      - 已知待查：本机 128² 及以上在 `capture_hdr` 处崩溃（32² 正常，疑老驱动的 FP16 FBO 回读缺陷）
+**关键发现（已写入 DESIGN V5.5）**
+- GLSL fp64 只保证算术与 `sqrt`（exp/log/pow 的 double 重载不可用）→ 超越函数下沉 float
+- 无 fp64 硬件的 GPU（Terascale）上 fp64 片元 2.16 s/帧并触发 TDR 崩溃；fp32 变体 12.7 ms/帧（≈170×）
+- smoke 渲染尺寸必须与窗口尺寸解耦（Windows 强制窗口最小尺寸：32×32 被拉到 120×32）
+- PFM 行序必须统一（CPU 侧原写反 → NMSE≈1.8；修正后 1.6e-4）
+
 
 ### T1.4 盘体渲染 + 相对论效应 ⛓T1.3
 - [ ] T1.4.1 通量剖面 + 高斯厚度 + 采样裁剪（§4.5）

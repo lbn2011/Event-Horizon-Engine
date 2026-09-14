@@ -17,6 +17,12 @@ out.png
 ehe_test_lut.f32
 ehe_test_config.json
 
+# 开发期日志与本地验证产物（CI 产物走 artifact，不入库）
+*.log
+artifacts/
+tmp_*.pfm
+tmp_*.png
+
 # 工具链本地路径（各人机器不同）
 tools/
 

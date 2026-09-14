@@ -15,6 +15,7 @@ add_library(ehe_core STATIC
   src/blackbody.cpp
   src/golden.cpp
   src/sha256.cpp
+  src/image_io.cpp
 )
 
 target_include_directories(ehe_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")

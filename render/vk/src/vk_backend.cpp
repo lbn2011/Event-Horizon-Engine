@@ -55,6 +55,7 @@ public:
     bool init(const RendererConfig& cfg) override {
         // Vulkan 不需要 GL 上下文：窗口必须以 GLFW_NO_API 创建
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+        glfwWindowHint(GLFW_VISIBLE, cfg.visible ? GLFW_TRUE : GLFW_FALSE);
         window_ = glfwCreateWindow(cfg.width, cfg.height, cfg.title, nullptr, nullptr);
         if (window_ == nullptr) {
             std::fprintf(stderr, "[vk] 创建窗口失败\n");
@@ -219,6 +220,27 @@ public:
     void framebuffer_size(int& width, int& height) const override {
         width = width_;
         height = height_;
+    }
+
+    // ---------------------------------------------------------------- raymarch 管线（T1.6 实现）
+    // 规格见 DESIGN §5.4.1 的 Vulkan 列：R16G16B16A16_SFLOAT 附件 + descriptor set 0
+    // （binding 0 = UBO，binding 1 = 黑体 LUT）+ glslang 运行时编译 SPIR-V。
+    // T1.3 阶段先提供接口骨架（Vulkan 路径尚未接渲染管线，M0 门禁也仍待目标机验收）。
+
+    void set_params(const SimParams& params) override { params_ = params; }
+
+    void set_shader_root(const std::string& root) override { shader_root_ = root; }
+
+    bool pipeline_ready() const override { return false; }
+
+    const std::string& last_error() const override { return last_error_; }
+
+    bool capture_hdr(std::vector<float>& rgb, int& width, int& height) override {
+        (void)rgb;
+        (void)width;
+        (void)height;
+        last_error_ = "Vulkan 后端的 raymarch 管线与 HDR 回读将在 T1.6 实现（当前仅 GL 可用）";
+        return false;
     }
 
 private:
@@ -731,6 +753,10 @@ private:
     }
 
     // ---------------------------------------------------------------- 成员
+
+    SimParams params_{};
+    std::string shader_root_;
+    std::string last_error_;
 
     GLFWwindow* window_ = nullptr;
     bool vsync_ = true;

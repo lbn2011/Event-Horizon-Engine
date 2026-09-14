@@ -82,6 +82,32 @@ jobs:
           build/bin/ehe_reftool.exe lut
           git diff --exit-code -- tests/golden/blackbody_lut.f32 shaders/blackbody_lut.f32
 
+      # ---------------------------------------------------------------- L1 参照一致性
+      # 「CI 算数据 → 出文件 → 人工/后续验算」的落地：
+      #   CI 用 CPU 参考实现重渲染小尺寸 golden（fp64），与仓库内基线做 NMSE 差分，
+      #   并把 PFM/PNG/差分日志作为 artifact 上传，便于跨机器核对（DESIGN §6.2/§6.3 的 CPU 侧）。
+      - name: L1 参照一致性（CPU fp64：重渲染 tiny 基线并与仓库基线差分）
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          build/bin/ehe_reftool.exe golden --params=tests/golden/params_tiny.json --shot=artifacts/ci_golden_tiny
+          build/bin/ehe_reftool.exe compare artifacts/ci_golden_tiny.pfm tests/golden/golden_tiny.pfm --threshold=1e-9 |
+            Tee-Object -FilePath artifacts/ci_compare_tiny.log
+          build/bin/ehe_reftool.exe golden --params=tests/golden/params_small.json --shot=artifacts/ci_golden_small
+          build/bin/ehe_reftool.exe compare artifacts/ci_golden_small.pfm tests/golden/golden_small.pfm --threshold=1e-9 |
+            Tee-Object -FilePath artifacts/ci_compare_small.log
+
+      - name: 上传 L1 参照数据（供跨机器验算）
+        # 同 checkout：本仓库启用 sha_pinning_required，必须钉到提交 SHA
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: l1-reference-data
+          path: |
+            artifacts/*.pfm
+            artifacts/*.png
+            artifacts/*.log
+          if-no-files-found: error
+
       - name: 冒烟：GL 后端自检（CI runner 无独显，允许失败但不隐藏结果）
         shell: pwsh
         continue-on-error: true

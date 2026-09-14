@@ -24,24 +24,12 @@
 #include "ehe/core/blackbody.h"
 #include "ehe/core/config.h"
 #include "ehe/core/golden.h"
+#include "ehe/core/image_io.h"
 #include "ehe/core/integrator.h"
 #include "ehe/core/sha256.h"
 
 namespace {
 
-/// 写 PFM（PF：彩色 float；行序自下而上，scale = -1.0 表示小端）
-bool write_pfm(const std::string& path, const ehe::core::HdrImage& image) {
-    std::ofstream stream(path, std::ios::binary);
-    if (!stream) {
-        return false;
-    }
-    stream << "PF\n" << image.width << " " << image.height << "\n-1.0\n";
-    for (int y = image.height - 1; y >= 0; --y) {  // PFM 自下而上
-        stream.write(reinterpret_cast<const char*>(image.at(0, y)),
-                     static_cast<std::streamsize>(sizeof(float) * 3 * image.width));
-    }
-    return stream.good();
-}
 
 bool write_png(const std::string& path, int width, int height, const std::vector<std::uint8_t>& rgb) {
     return stbi_write_png(path.c_str(), width, height, 3, rgb.data(), width * 3) != 0;
@@ -157,7 +145,7 @@ int run_golden(int argc, char** argv) {
 
     const std::string pfm_path = shot_base + ".pfm";
     const std::string png_path = shot_base + ".png";
-    if (!write_pfm(pfm_path, image)) {
+    if (!ehe::core::write_pfm(pfm_path, image)) {
         std::fprintf(stderr, "[reftool] PFM 写出失败：%s\n", pfm_path.c_str());
         return 1;
     }
@@ -183,11 +171,88 @@ int run_golden(int argc, char** argv) {
     return 0;
 }
 
+// ---------------------------------------------------------------- 新增子命令：compare / png
+
+/// `compare <a.pfm> <b.pfm> [--threshold=T]`：按 §6.2 计算 NMSE，退出码 0（通过）/1（超阈值）
+int run_compare(int argc, char** argv) {
+    std::vector<std::string> positional;
+    double threshold = 1e-3;
+    for (int i = 2; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg.rfind("--threshold=", 0) == 0) {
+            threshold = std::strtod(arg.substr(12).c_str(), nullptr);
+        } else {
+            positional.push_back(arg);
+        }
+    }
+    if (positional.size() != 2) {
+        std::fprintf(stderr, "用法：ehe_reftool compare <a.pfm> <b.pfm> [--threshold=1e-3]\n");
+        return 2;
+    }
+
+    ehe::core::HdrImageF a;
+    ehe::core::HdrImageF b;
+    if (!ehe::core::read_pfm(positional[0], a) || !ehe::core::read_pfm(positional[1], b)) {
+        std::fprintf(stderr, "[reftool] PFM 读取失败\n");
+        return 2;
+    }
+    const ehe::core::DiffStats stats = ehe::core::diff_stats(a, b);
+    if (!stats.comparable) {
+        std::fprintf(stderr, "[reftool] 图像不可比（%dx%d vs %dx%d）\n", a.width, a.height, b.width,
+                     b.height);
+        return 2;
+    }
+    std::printf("[reftool] %s vs %s（%dx%d）\n", positional[0].c_str(), positional[1].c_str(), a.width,
+                a.height);
+    std::printf("[reftool] NMSE=%.6e（阈值 %.1e）  R=%.3e G=%.3e B=%.3e\n", stats.nmse, threshold,
+                stats.nmse_rgb[0], stats.nmse_rgb[1], stats.nmse_rgb[2]);
+    std::printf("[reftool] 最大绝对差=%.6e  平均绝对差=%.6e\n", stats.max_abs_diff,
+                stats.mean_abs_diff);
+    if (stats.nmse <= threshold) {
+        std::printf("[reftool] 通过\n");
+        return 0;
+    }
+    std::printf("[reftool] 超阈值\n");
+    return 1;
+}
+
+/// `png <in.pfm> <out.png> [--exposure=E]`：把 PFM 转成 PNG 预览（供肉眼查看）
+int run_png(int argc, char** argv) {
+    std::vector<std::string> positional;
+    double exposure = 1.0;
+    for (int i = 2; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg.rfind("--exposure=", 0) == 0) {
+            exposure = std::strtod(arg.substr(11).c_str(), nullptr);
+        } else {
+            positional.push_back(arg);
+        }
+    }
+    if (positional.size() != 2) {
+        std::fprintf(stderr, "用法：ehe_reftool png <in.pfm> <out.png> [--exposure=1.0]\n");
+        return 2;
+    }
+
+    ehe::core::HdrImageF image;
+    if (!ehe::core::read_pfm(positional[0], image)) {
+        std::fprintf(stderr, "[reftool] PFM 读取失败：%s\n", positional[0].c_str());
+        return 2;
+    }
+    const auto bytes = ehe::core::tonemap_to_srgb8(image, exposure);
+    if (!write_png(positional[1], image.width, image.height, bytes)) {
+        std::fprintf(stderr, "[reftool] PNG 写出失败：%s\n", positional[1].c_str());
+        return 2;
+    }
+    std::printf("[reftool] 已写出 %s（%dx%d，曝光 %.2f）\n", positional[1].c_str(), image.width,
+                image.height, exposure);
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::printf("用法: ehe_reftool <lut|golden> [--key=value ...]\n");
+        std::printf("用法: ehe_reftool <lut|golden|compare|png> [参数...]\n");
         return 2;
     }
     const std::string command = argv[1];
@@ -196,6 +261,12 @@ int main(int argc, char** argv) {
     }
     if (command == "golden") {
         return run_golden(argc, argv);
+    }
+    if (command == "compare") {
+        return run_compare(argc, argv);
+    }
+    if (command == "png") {
+        return run_png(argc, argv);
     }
     std::fprintf(stderr, "[reftool] 未知子命令：%s\n", command.c_str());
     return 2;

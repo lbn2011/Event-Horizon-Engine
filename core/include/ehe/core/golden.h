@@ -18,6 +18,7 @@
 #include "ehe/core/blackbody.h"
 #include "ehe/core/camera.h"
 #include "ehe/core/config.h"
+#include "ehe/core/image_io.h"
 #include "ehe/core/integrator.h"
 
 namespace ehe::core {
@@ -74,17 +75,8 @@ struct RenderStats {
     double max_g = 0.0;
 };
 
-/// HDR 图像缓冲（线性 RGB，行序自上而下）
-struct HdrImage {
-    int width = 0;
-    int height = 0;
-    std::vector<float> pixels;  ///< 3 × width × height
-
-    float* at(int x, int y) { return &pixels[3 * (static_cast<std::size_t>(y) * width + x)]; }
-    const float* at(int x, int y) const {
-        return &pixels[3 * (static_cast<std::size_t>(y) * width + x)];
-    }
-};
+// HDR 图像缓冲统一使用 core::HdrImageF（core/image_io.h，行序自下而上，与 PFM 一致）
+using HdrImage = HdrImageF;
 
 /// 盘相关解析式（T1.4 的 GLSL 版本必须与此逐行一致）
 double disk_flux_profile(double r, const DiskParams& disk);       ///< F(r) ∝ (1 − √(r_in/r))/r³

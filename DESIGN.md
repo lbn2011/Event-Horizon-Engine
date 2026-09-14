@@ -1,4 +1,4 @@
-# Event Horizon Engine (EHE) — 开发文档 V5.4
+# Event Horizon Engine (EHE) — 开发文档 V5.5
 
 > **本文档是 EHE 项目开发的唯一权威依据。** 原始需求对话（`黑洞渲染模拟：Kerr度规光线....json`）仅为历史参考，
 > 凡本文档与对话冲突之处，以本文档为准。本文档不含代码；修改本文档需明确提出并递增版本号。
@@ -25,6 +25,16 @@
 > ② §4.5 的发射公式 ε = ρ·g³·LUT **缺绝对尺度**（沿测地线累积上百步后可达 10² 量级）→ 新增归一化常数 `emission_scale`（默认 2.5，仅做数值归一，物理对比仍由 ρ/F(r)/g³ 承载）；
 > ③ §6.1 golden 相机 r=15 **落在盘径向范围 [6,20] 内且贴近盘面**（相机嵌在盘介质里，产生满屏弥散辉光）→ 改为 r=30；golden 的 `N_max` 300 → **1000**（参考基准不应受实时步数预算限制；实测步数用尽像素从 106067 降到 4）；
 > ④ 黑体 LUT 所用 CIE 1931 2° 配色函数的**数据来源与许可**（BSD-3 项目提取、原始为 CIE 公开数据集）与生成脚本路径入档（§4.5）。
+> V5.5（2026-09-14）：**T1.3 GLSL 移植过程中的 5 处规格补充/约束**（均由真实 GPU 运行暴露）：
+> ① §5.8 增加 **GLSL fp64 约束**：只保证算术与 `sqrt`，`exp/log/pow` 的 double 重载不可用
+>   （`tests/src/test_shaders.cpp` 有探测用例）→ 超越函数一律下沉到 float（影响盘密度/吸收/LUT 索引映射）；
+> ② §4.3/§7 **fp32 编译变体成为一等模式**：Terascale 等无 fp64 硬件的 GPU 上，fp64 由驱动软件模拟，
+>   实测 AMD HD 7400M 单帧 **2.16 s**（32²×60 步）并触发 Windows TDR 驱动复位崩溃；切 fp32 后同场景 **12.7 ms（≈170×）**。
+>   实现方式：`EHE_FP32_ONLY` 宏（渲染器按 `integrator.precision` 注入，宏定义见 §4.3/§7）；
+> ③ §5.3 UBO **追加 offset 10（extras）**：emission_scale / thickness_scale / debug_view（字段可增不可改序）；
+> ④ §6.3 smoke 两条实现约束：**渲染尺寸必须与窗口尺寸解耦**（Windows 对可见窗口有最小尺寸限制，
+>   实测 32×32 被系统拉到 120×32）；**PFM 行序统一**为「内存第 0 行 = 顶部，文件按标准自下而上」（此前 CPU 侧写反导致 NMSE≈1.8）；
+> ⑤ §5.8 文件清单新增 `present.frag`（T1.5 前占位：曝光 + Reinhard + sRGB；T1.5 由 `post_final.frag` 取代）。
 
 ---
 
@@ -355,12 +365,19 @@ shaders/
 │   ├── noise.glsl       # hash/value noise/fbm
 │   └── simparams.glsl   # UBO 块声明（与 §5.3 布局一致，唯一来源）
 ├── fullscreen.vert      # 全屏三角形（3 顶点无 VBO，gl_VertexID 生成）
+├── present.frag         # 【T1.5 前占位】曝光 + Reinhard + sRGB；T1.5 由 post_final.frag 取代
 ├── raymarch.frag        # 主积分循环 + 调试视图分支
 ├── particle.comp / particle.vert / particle.frag
 ├── post_fsr1_*.glsl     # FSR1 EASU/RCAS（GPUOpen 头文件）
 ├── post_fxaa.frag
 └── post_final.frag      # ACES + 曝光 + 色差
 ```
+
+**精度约定（V5.5）**：GLSL 的 fp64 只保证**算术运算与 `sqrt`**；`exp`/`log`/`pow` 的 double 重载
+在 glslang 与常见驱动下均不可用（探测用例见 `tests/src/test_shaders.cpp`）。
+因此 shader 侧规则是：**关键精度路径只用 +−×÷ 与 sqrt（fbm/密度/吸收/LUT 索引等超越运算一律在 float 侧完成）**；
+`0.25` 次幂用 `sqrt(sqrt(x))` 实现。另：fp64 需显式开启 `GL_ARB_gpu_shader_fp64`，且**无 fp64 硬件的 GPU 上不可用**
+（见 §7 的 fp32 模式）。
 
 **include 约定**：GL 450 无原生 `#include`（`GL_ARB_shading_language_include` 不普及），
 由 render/ShaderSource 在 C++ 侧做文本递归展开后交给两后端——GL 直接编译、VK 过 glslang；
