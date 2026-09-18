@@ -318,8 +318,18 @@ Config Config::load_from_file(const std::string& path, std::vector<std::string>*
     }
     std::stringstream buffer;
     buffer << stream.rdbuf();
+    std::string text = buffer.str();
+
+    // BOM 容错：Windows 记事本 / PowerShell 5.1 的 Set-Content 会把文件存成「UTF-8 带 BOM」，
+    // 而 JSON 解析器遇到首字节的 EF BB BF 会直接报错。这里剥掉 BOM（并提示），避免手工编辑参数文件踩坑。
+    if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
+        static_cast<unsigned char>(text[1]) == 0xBB && static_cast<unsigned char>(text[2]) == 0xBF) {
+        text.erase(0, 3);
+        warn(warnings, "配置文件带 UTF-8 BOM，已自动剥离：" + path);
+    }
+
     try {
-        const nlohmann::json json = nlohmann::json::parse(buffer.str());
+        const nlohmann::json json = nlohmann::json::parse(text);
         return from_json(json, warnings);
     } catch (const std::exception& error) {
         warn(warnings, std::string("配置解析失败，使用默认值：") + error.what());
