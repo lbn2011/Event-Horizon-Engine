@@ -256,7 +256,7 @@ int run_smoke(const Options& options) {
         last_frame_ms = ms;
     }
 
-    std::printf("[smoke] 预热帧耗时 %.1f ms（%dx%d, n_max=%.0f, %s）\n", last_frame_ms, image_width,
+    std::printf("[smoke] 预热帧耗时 %.1f ms（%dx%d, n_max=%d, %s）\n", last_frame_ms, image_width,
                 image_height, config.integrator.n_max,
                 (config.integrator.precision == ehe::core::PrecisionMode::Fp32) ? "fp32"
                                                                                : "mixed(fp64)");
