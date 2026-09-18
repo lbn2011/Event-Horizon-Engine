@@ -98,6 +98,9 @@ public:
         shader_defines_ = cfg.shader_defines;
         render_width_ = cfg.render_width;
         render_height_ = cfg.render_height;
+        if (!cfg.shader_root.empty()) {
+            shader_root_ = cfg.shader_root;  // 必须在 build_pipeline 之前（见 IRenderer.h 说明）
+        }
         build_pipeline();  // 失败不致命：窗口与面板仍可用，错误经 last_error 暴露给 UI
         return true;
     }

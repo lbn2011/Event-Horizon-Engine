@@ -210,6 +210,7 @@ int run_smoke(const Options& options) {
     cfg.title = "EHE smoke";
     cfg.vsync = false;
     cfg.visible = false;  // 离屏
+    cfg.shader_root = options.shader_root;
     cfg.render_width = image_width;    // 与 golden 严格同尺寸（窗口尺寸受系统最小值限制，不能依赖）
     cfg.render_height = image_height;
     if (config.integrator.precision == ehe::core::PrecisionMode::Fp32) {
@@ -422,6 +423,7 @@ int run_window(const Options& options) {
     cfg.height = options.height;
     cfg.title = "Event Horizon Engine";
     cfg.vsync = options.vsync;
+    cfg.shader_root = options.shader_root;
     if (config.integrator.precision == ehe::core::PrecisionMode::Fp32) {
         cfg.shader_defines.push_back("EHE_FP32_ONLY");
         std::printf("[main] 精度模式：fp32（EHE_FP32_ONLY）\n");
@@ -555,6 +557,7 @@ int main(int argc, char** argv) {
         cap_options.config_path = options.config_path;
         cap_options.time_mixed = options.time_mixed;
         cap_options.probe_size = options.probe_size;
+        cap_options.shader_root = options.shader_root;
         exit_code = ehe::app::run_caps(cap_options);
     } else if (options.try_backends) {
         exit_code = try_backends();

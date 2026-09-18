@@ -79,6 +79,7 @@ void probe_backend(const ehe::core::Config& config, ehe::core::Backend backend,
     cfg.title = "EHE caps";
     cfg.vsync = false;
     cfg.visible = false;
+    cfg.shader_root = options.shader_root;  // 必须在 init 前（init 内构建管线）
 
     auto renderer = create_renderer(backend);
     if (renderer == nullptr || !renderer->init(cfg)) {

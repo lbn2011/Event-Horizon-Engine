@@ -14,6 +14,7 @@ struct CapOptions {
     std::string config_path = "tests/golden/params_tiny.json";
     int probe_frames = 3;      ///< 每个精度模式测时的帧数
     bool time_mixed = false;   ///< 是否对 mixed(fp64) 模式实测帧耗时（默认关闭，避免软件模拟 fp64 挂死驱动）
+    std::string shader_root;   ///< shaders 目录（bundle 解压到任意目录时必须显式给出）
     int probe_size = 64;       ///< 测时用的渲染尺寸（避开受限 GPU 的大尺寸回读问题）
 };
 

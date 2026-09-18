@@ -24,6 +24,11 @@ struct RendererConfig {
     int render_width = 0;
     int render_height = 0;
 
+    /// shader 搜索根目录（含 common/ 的 shaders 目录）。
+    /// **必须在 init 前设置**：GL 后端在 init 里就构建管线，init 之后设置已来不及
+    /// （踩坑：bundle 解压到任意目录后 CWD 没有 shaders/，--caps 因此报"无法打开 shader 文件"）。
+    std::string shader_root;
+
     /// 编译 shader 时注入的宏（在 `#version` 之后插入 `#define`）。
     /// 主要用途：`EHE_FP32_ONLY` —— 受限 GPU（无 fp64 硬件）上启用 fp32 精度路径（§4.3/§7）。
     std::vector<std::string> shader_defines;
