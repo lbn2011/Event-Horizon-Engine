@@ -48,6 +48,10 @@ struct BlackHoleConfig {
     double disk_density = 1.0;       ///< 归一化盘密度（进入通量剖面）
     double disk_t_scale = 10000.0;   ///< 盘温标定 T_scale（单位 K；峰值温度，进入黑体 LUT 前需有物理量级）
     double disk_kappa = 2.0;         ///< 吸收系数 κ（§4.5 体合成，建议默认 2）
+    /// 盘湍流噪声振幅 ∈ [0,1]（§4.5 fbm 调制 ρ 与发射；V5.8 新增字段）。
+    /// 默认 0.35 = 交互观感（有明显湍流纹理）；**golden 基线在参数文件里显式写 0**（§6.1「无噪声动画」），
+    /// 使基线与噪声实现解耦、逐位可复现（噪声的 GPU/CPU hash 不可能逐位一致，不能进 NMSE 差分）。
+    double disk_noise = 0.35;
 };
 
 struct IntegratorConfig {

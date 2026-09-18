@@ -17,7 +17,7 @@
     "disk_r_out": 20.0,
     "disk_density": 1.0,
     "disk_t_scale": 10000.0,
-    "disk_kappa": 2.0
+    "disk_kappa": 2.0, "disk_noise": 0.0
   },
   "integrator": {
     "n_max": 1000,

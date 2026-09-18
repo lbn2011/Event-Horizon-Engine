@@ -98,6 +98,8 @@ SimParams make_sim_params(const core::Config& config, const core::Camera& camera
     params.extras[0] = 2.5F;    // emission_scale：V5.4 的数值归一（与 golden 默认一致）
     params.extras[1] = 0.1F;    // thickness_scale：σ_d = 0.1·r（§4.5）
     params.extras[2] = 0.0F;    // debug_view = Shaded
+    // V5.8：盘湍流噪声振幅（0 = 关闭；golden 基线用 0，见 Config::BlackHoleParams::disk_noise）
+    params.extras[3] = static_cast<float>(config.blackhole.disk_noise);
     return params;
 }
 

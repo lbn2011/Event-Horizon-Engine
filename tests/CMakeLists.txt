@@ -18,6 +18,7 @@ add_executable(ehe_tests
   src/test_shaders.cpp
   src/test_image_io.cpp
   src/test_repo_hygiene.cpp
+  src/test_noise.cpp
 )
 
 target_link_libraries(ehe_tests

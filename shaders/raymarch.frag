@@ -28,6 +28,11 @@ const int EHE_MAX_STEPS = 2048;
 // v1 背景：纯色（与 golden 的 (0.02, 0.02, 0.03) 一致）；M2 起替换为星空 cubemap（§4.6）
 const vec3 EHE_BACKGROUND = vec3(0.02, 0.02, 0.03);
 
+// 盘湍流噪声的空间频率（每单位长度的噪声周期数）。盘半径区间 [6, 20]，
+// 取 0.6 得到约 1.7 个长度单位的特征尺寸——比盘厚（σ=0.1r）大、比盘半径小，视觉上合适。
+// 不做成 Config 项：§8.1 的 schema 未列该键，保持参数面板简洁；如需调，改这里即可。
+#define EHE_NOISE_SCALE 0.6
+
 // 终止结局（与 CPU 侧 TraceOutcome 对齐）
 const int EHE_OUTCOME_CAPTURED = 0;
 const int EHE_OUTCOME_ESCAPED = 1;
@@ -96,6 +101,9 @@ void main() {
     const EHE_REAL emission_scale = EHE_REAL(extras.x);
     const EHE_REAL thickness_scale = EHE_REAL(extras.y);
     const int view = int(extras.z + 0.5);
+    // V5.8：extras.w = 盘湍流噪声振幅（0 = 关闭，golden 基线即用 0）
+    const float noise_amplitude = extras.w;
+    const EHE_REAL time_value = EHE_REAL(frame.y);
     const bool disk_enabled = (flags.x & EHE_FLAG_DISK_ENABLED) != 0u;
 
     // ---------------------------------------------------------------- 光线初始条件（§4.2）
@@ -146,9 +154,30 @@ void main() {
             const EHE_REAL h = adaptive_step(r, spin, h0, h_min, h_max);
             const EHE_REAL3 mid = position + EHE_REAL3(0.5 * h) * k.yzw;
             const EHE_REAL r_mid = ks_radius(mid, spin);
-            const EHE_REAL density =
-                disk_density(r_mid, mid.z, r_in, r_out, density_param, thickness_scale);
+
+            // §4.5 采样加速：|z| > 3σ 且步进方向**远离**赤道面时，本步不可能进入盘体 → 免费跳过。
+            // （薄盘几何决定的裁剪；阴影轮廓与积分终止逻辑不受影响）
+            const EHE_REAL sigma_mid = thickness_scale * r_mid;
+            const bool heading_away = (position.z * k.z) > 0.0;
+            const bool skip_disk = (abs(mid.z) > 3.0 * sigma_mid) && heading_away;
+
+            EHE_REAL density = skip_disk
+                                   ? 0.0
+                                   : disk_density(r_mid, mid.z, r_in, r_out, density_param,
+                                                  thickness_scale);
             if (density > 1e-6) {
+                // 湍流调制（§4.5「调制 ρ 与发射」）。**为什么不能只调制 ρ**：
+                // 盘在 κ=2、ρ~1 时是光学厚的，出射强度趋于源函数 S = ε/κ ∝ g³·LUT/κ —— ρ 被约掉，
+                // 只调制密度在画面上几乎看不出来（实测振幅 1.0 时 NMSE 仅 4.7e-4 ≈ 像素变化 2%）。
+                // 因此噪声主要作用在**发射系数**上（体现湍流引起的发射率起伏），ρ 只做较弱调制（影响不透明度）。
+                const float density_noise = max(
+                    disk_noise_factor(mid, r_mid, time_value, noise_amplitude * 0.35, EHE_NOISE_SCALE),
+                    0.0);
+                const float emission_noise = max(
+                    disk_noise_factor(mid, r_mid, time_value, noise_amplitude, EHE_NOISE_SCALE * 1.7),
+                    0.0);
+                density *= EHE_REAL(density_noise);
+
                 const KsPoint mid_point = ks_evaluate(mid, spin);
                 const EHE_REAL4 u_em = disk_four_velocity(mid, r_mid);
                 const EHE_REAL g = redshift_factor(k_dot_u_obs, mid_point, k, u_em);
@@ -159,7 +188,8 @@ void main() {
                 const EHE_REAL temperature = disk_temperature(r_mid, r_in, t_scale) * g;
                 const vec3 emitted = sample_blackbody(temperature);
                 const EHE_REAL g3 = g * g * g;
-                const EHE_REAL luminance = (1.0 - alpha) * emission_scale * density * g3 * h;
+                const EHE_REAL luminance =
+                    (1.0 - alpha) * emission_scale * density * EHE_REAL(emission_noise) * g3 * h;
                 // 吸收项：exp 下沉到 float（§5.8 精度约束）；不影响发射-吸收的物理形态
                 const EHE_REAL absorb = 1.0 - EHE_REAL(exp(float(-kappa * density * h)));
                 color += vec3(luminance) * emitted;
