@@ -1,5 +1,6 @@
 #include "ehe/core/config.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -183,6 +184,7 @@ nlohmann::json Config::to_json() const {
         {"disk_density", blackhole.disk_density},
         {"disk_t_scale", blackhole.disk_t_scale},
         {"disk_kappa", blackhole.disk_kappa},
+    {"disk_noise", blackhole.disk_noise},
     };
     json["integrator"] = {
         {"n_max", integrator.n_max},
@@ -242,7 +244,7 @@ Config Config::from_json(const nlohmann::json& json, std::vector<std::string>* w
         const nlohmann::json& g = *it;
         collect_unknown_keys(g,
                              {"mass", "spin", "disk_r_in", "disk_r_out", "disk_density", "disk_t_scale",
-                              "disk_kappa"},
+                              "disk_kappa", "disk_noise"},
                              "blackhole", warnings);
         read_number(g, "mass", config.blackhole.mass, warnings, "blackhole");
         read_number(g, "spin", config.blackhole.spin, warnings, "blackhole");
@@ -251,6 +253,8 @@ Config Config::from_json(const nlohmann::json& json, std::vector<std::string>* w
         read_number(g, "disk_density", config.blackhole.disk_density, warnings, "blackhole");
         read_number(g, "disk_t_scale", config.blackhole.disk_t_scale, warnings, "blackhole");
         read_number(g, "disk_kappa", config.blackhole.disk_kappa, warnings, "blackhole");
+        read_number(g, "disk_noise", config.blackhole.disk_noise, warnings, "blackhole");
+        config.blackhole.disk_noise = std::clamp(config.blackhole.disk_noise, 0.0, 1.0);
     }
 
     // integrator

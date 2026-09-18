@@ -58,6 +58,8 @@ struct Options {
     std::string golden_path = "tests/golden/golden.pfm";
     std::string shader_root;
     std::string precision;         // 空 = 用配置文件的 precision；可选 fp32 / mixed（命令行覆盖）
+    double time = 0.0;             // 动画时间（秒）。smoke 用它做确定性输入；窗口模式作为起始偏移
+    bool animation = true;         // 窗口模式是否让 time 随实际时间推进（smoke 恒为固定值）
     double nmse_threshold = 1e-3;  // DESIGN §6.2 初值
 };
 
@@ -124,6 +126,10 @@ Options parse_args(int argc, char** argv) {
             }
         } else if (const char* v = value_of(arg, "--nmse")) {
             options.nmse_threshold = parse_double(v, options.nmse_threshold);
+        } else if (const char* v = value_of(arg, "--time")) {
+            options.time = parse_double(v, options.time);
+        } else if (std::strcmp(arg, "--no-animation") == 0) {
+            options.animation = false;
         } else if (std::strcmp(arg, "--smoke") == 0) {
             options.smoke = true;
         } else if (std::strcmp(arg, "--try-backends") == 0) {
@@ -245,8 +251,11 @@ int run_smoke(const Options& options) {
     const ehe::core::Vec3 forward = camera.forward();
     double last_frame_ms = 0.0;
     ehe::render::SimParams params =
-        ehe::render::make_sim_params(config, camera, forward, 1.0, 0.0);
+        ehe::render::make_sim_params(config, camera, forward, 1.0, options.time);
     renderer->set_params(params);
+    if (options.time != 0.0) {
+        std::printf("[smoke] 动画时间 time=%.3f s（用于湍流图案的确定性对照）\n", options.time);
+    }
 
     for (int frame = 0; frame < std::max(1, options.smoke_frames); ++frame) {
         const auto begin = std::chrono::steady_clock::now();
@@ -354,10 +363,11 @@ void on_scroll(GLFWwindow* window, double /*xoffset*/, double yoffset) {
 
 void draw_panel(const Options& options, ehe::core::Camera& camera, ehe::render::IRenderer& renderer,
                 ehe::render::SimParams& params, bool& request_switch,
-                ehe::core::Backend& target_backend) {
+                ehe::core::Backend& target_backend, ehe::core::Config& config, bool& animation,
+                double animation_time) {
     ImGui::SetNextWindowPos(ImVec2(16, 16), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(390, 300), ImGuiCond_FirstUseEver);
-    ImGui::Begin("EHE 控制面板（T1.3）");
+    ImGui::SetNextWindowSize(ImVec2(400, 420), ImGuiCond_FirstUseEver);
+    ImGui::Begin("EHE 控制面板（T1.3 / T1.4）");
 
     ImGui::Text("版本 %s [%s]", ehe::core::version_string(), ehe::core::build_flags());
     int width = 0;
@@ -380,6 +390,16 @@ void draw_panel(const Options& options, ehe::core::Camera& camera, ehe::render::
         ehe::render::set_debug_view(params, static_cast<ehe::render::DebugView>(current));
     }
     ImGui::TextDisabled("classify / steps 用于自查积分器行为");
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("盘体湍流（§4.5）");
+    float noise = static_cast<float>(config.blackhole.disk_noise);
+    if (ImGui::SliderFloat("噪声振幅", &noise, 0.0F, 1.0F, "%.2f")) {
+        config.blackhole.disk_noise = static_cast<double>(noise);
+    }
+    ImGui::Checkbox("动画（time 随时间推进）", &animation);
+    ImGui::TextDisabled("图案按 Ω(r)=r^-3/2 差速旋转（内快外慢）；0 = 关闭（golden 基线用 0）");
+    ImGui::Text("t = %.2f s", animation_time);
 
     ImGui::Separator();
     ImGui::TextUnformatted("相机（§4.7）");
@@ -475,6 +495,9 @@ int run_window(const Options& options) {
     int rendered = 0;
     double last_frame_ms = 0.0;
     auto frame_clock = std::chrono::steady_clock::now();
+    // 动画时间：以 --time 为起始偏移，开动画时随实际时间推进（§4.5 差速旋转由 UBO time 驱动）
+    const double animation_start = glfwGetTime();
+    bool animation = options.animation;
     while (running && !renderer->should_close()) {
         glfwPollEvents();
         if (window != nullptr) {
@@ -491,12 +514,15 @@ int run_window(const Options& options) {
         int height = 0;
         renderer->framebuffer_size(width, height);
         const double aspect = (height > 0) ? static_cast<double>(width) / height : 1.0;
+        const double animation_time =
+            options.time + (animation ? (glfwGetTime() - animation_start) : 0.0);
         ehe::render::SimParams params =
-            ehe::render::make_sim_params(config, camera, camera.forward(), aspect, 0.0);
+            ehe::render::make_sim_params(config, camera, camera.forward(), aspect, animation_time);
 
         bool request_switch = false;
         ehe::core::Backend target_backend = current_backend;
-        draw_panel(options, camera, *renderer, params, request_switch, target_backend);
+        draw_panel(options, camera, *renderer, params, request_switch, target_backend, config,
+                   animation, animation_time);
         renderer->set_params(params);  // 面板改动当帧生效
 
         renderer->end_frame();

@@ -7,7 +7,7 @@
 //     x = emission_scale（V5.4 规格缺口②：发射需绝对尺度归一）
 //     y = thickness_scale（盘半厚度系数 σ_d = k·r，避免把 §4.5 的常数写死在 shader）
 //     z = debug_view（§5.5 五种调试视图之一）
-//     w = 保留
+//     w = disk_noise（盘湍流噪声振幅，0 = 关闭；V5.8 追加，对应 Config.blackhole.disk_noise）
 //
 // 上传方式（双后端对照，§5.4.1）：GL 用 glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo)；
 //   VK 用 descriptor set 0 binding 0。两侧必须使用同一个 sizeof(SimParams) 校验。

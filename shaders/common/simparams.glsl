@@ -20,7 +20,8 @@ layout(std140, binding = 0) uniform SimParams {
     vec4 hole;           // [7]  x = spin_a, y = r_in, z = r_out, w = disk_density
     vec4 disk;           // [8]  x = t_scale, y = kappa, z = exposure, w = chrom_ab
     uvec4 flags;         // [9]  x = 位标志, y = res_scale, z = particle_count, w = 保留
-    vec4 extras;         // [10] x = emission_scale, y = thickness_scale, z = debug_view, w = 保留
+    vec4 extras;         // [10] x = emission_scale, y = thickness_scale, z = debug_view,
+                         //      w = disk_noise（盘湍流噪声振幅，0 = 关闭；V5.8 追加）
 };
 
 // flags.x 的位定义（与 C++ 侧 ehe::render::SimFlags 保持一致）
