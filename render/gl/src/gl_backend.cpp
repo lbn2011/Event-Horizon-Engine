@@ -337,7 +337,7 @@ private:
                 define_log += " ";
             }
         }
-        std::printf("[gl] 编译宏：%s\\n", define_log.c_str());
+        std::printf("[gl] 编译宏：%s\n", define_log.c_str());
 
         if (vert.ok) {
             vert.source.text = insert_defines_after_version(vert.source.text, shader_defines_);

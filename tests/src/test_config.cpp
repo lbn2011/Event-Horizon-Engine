@@ -5,6 +5,7 @@
 #include <doctest/doctest.h>
 
 #include <cstdio>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -206,4 +207,60 @@ TEST_CASE("config: 文件读写往返（不存在的文件返回默认值并告�
     CHECK(loaded.render.debug_view == "steps");
 
     std::remove(path.c_str());
+}
+
+TEST_CASE("config: 空文件 / 非法 JSON / BOM 都必须安全回退（绝不抛异常）") {
+    // 背景：目标机实测出现「配置文件为空 → ehe.exe 以 0xC0000409 崩溃」。
+    // 根因是调用方直接 `stream >> json` 未兜异常；这里把这些边界固化成用例。
+    const std::string empty_path = "ehe_test_empty_config.json";
+    const std::string bom_path = "ehe_test_bom_config.json";
+    const std::string bad_path = "ehe_test_bad_config.json";
+
+    {
+        std::ofstream out(empty_path, std::ios::binary);  // 空文件
+    }
+    {
+        std::ofstream out(bom_path, std::ios::binary);
+        out << "\xEF\xBB\xBF";  // UTF-8 BOM（记事本存出来的样子）
+        out << R"({"image": {"width": 96, "height": 48}, "integrator": {"n_max": 123}})";
+    }
+    {
+        std::ofstream out(bad_path, std::ios::binary);
+        out << R"({"image": {"width": )";  // 故意截断
+    }
+
+    // 1) 空文件：回退默认值 + 告警，且不抛
+    std::vector<std::string> warnings;
+    const Config from_empty = Config::load_from_file(empty_path, &warnings);
+    CHECK(from_empty.integrator.n_max == Config{}.integrator.n_max);
+    CHECK_FALSE(warnings.empty());
+
+    // 2) 带 BOM 的合法 JSON：必须正常解析
+    warnings.clear();
+    const Config from_bom = Config::load_from_file(bom_path, &warnings);
+    CHECK(from_bom.integrator.n_max == 123);
+
+    // 3) 非法 JSON：回退默认值，不抛
+    warnings.clear();
+    const Config from_bad = Config::load_from_file(bad_path, &warnings);
+    CHECK(from_bad.integrator.n_max == Config{}.integrator.n_max);
+    CHECK_FALSE(warnings.empty());
+
+    // 4) read_image_size：失败时不得改动输出参数；成功时读出并接受 BOM
+    int width = 512;
+    int height = 512;
+    CHECK_FALSE(Config::read_image_size(empty_path, width, height));
+    CHECK(width == 512);
+    CHECK(height == 512);
+    CHECK_FALSE(Config::read_image_size(bad_path, width, height));
+    CHECK(width == 512);
+    CHECK_FALSE(Config::read_image_size("ehe_no_such_config.json", width, height));
+    CHECK(width == 512);
+    CHECK(Config::read_image_size(bom_path, width, height));
+    CHECK(width == 96);
+    CHECK(height == 48);
+
+    std::remove(empty_path.c_str());
+    std::remove(bom_path.c_str());
+    std::remove(bad_path.c_str());
 }

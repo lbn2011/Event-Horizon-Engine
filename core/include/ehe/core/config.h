@@ -104,6 +104,12 @@ struct Config {
     /// 读取文件；文件不存在时返回默认值并把提示写入 warnings
     static Config load_from_file(const std::string& path, std::vector<std::string>* warnings = nullptr);
 
+    /// 从配置 JSON 读取 image 块（§6.1 的 width/height）。
+    /// 成功返回 true；文件不存在/为空/非法 JSON/无 image 块时返回 false 并保持 width/height 不变。
+    /// **绝不抛异常** —— 早期版本在调用方直接 `stream >> json`，空文件会让进程 std::terminate
+    /// （退出码 0xC0000409），因此这里统一吞掉异常并交由调用方决定回退默认值。
+    static bool read_image_size(const std::string& path, int& width, int& height);
+
     /// 写出文件（缩进 2）
     bool save_to_file(const std::string& path) const;
 

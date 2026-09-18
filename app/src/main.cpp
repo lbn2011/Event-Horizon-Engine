@@ -57,6 +57,7 @@ struct Options {
     std::string config_path = "tests/golden/params.json";
     std::string golden_path = "tests/golden/golden.pfm";
     std::string shader_root;
+    std::string precision;         // 空 = 用配置文件的 precision；可选 fp32 / mixed（命令行覆盖）
     double nmse_threshold = 1e-3;  // DESIGN §6.2 初值
 };
 
@@ -115,6 +116,12 @@ Options parse_args(int argc, char** argv) {
             options.golden_path = v;
         } else if (const char* v = value_of(arg, "--shader-root")) {
             options.shader_root = v;
+        } else if (const char* v = value_of(arg, "--precision")) {
+            options.precision = v;
+            if (options.precision != "fp32" && options.precision != "mixed") {
+                std::fprintf(stderr, "[main] --precision 只接受 fp32 / mixed，收到 '%s'（已忽略）\n", v);
+                options.precision.clear();
+            }
         } else if (const char* v = value_of(arg, "--nmse")) {
             options.nmse_threshold = parse_double(v, options.nmse_threshold);
         } else if (std::strcmp(arg, "--smoke") == 0) {
@@ -183,25 +190,25 @@ bool write_preview_png(const std::string& path, const ehe::core::HdrImageF& imag
 int run_smoke(const Options& options) {
     // 1) 加载 golden 参数（复用 Config 的容错解析：未知键告警、缺失键默认、值域钳制）
     std::vector<std::string> warnings;
-    const ehe::core::Config config = ehe::core::Config::load_from_file(options.config_path, &warnings);
+    // 命令行精度覆盖：目标机上不必再改 JSON（也避免"改写参数文件"那一整类失败）
+    ehe::core::Config config = ehe::core::Config::load_from_file(options.config_path, &warnings);
+    if (!options.precision.empty()) {
+        config.integrator.precision = (options.precision == "fp32")
+                                          ? ehe::core::PrecisionMode::Fp32
+                                          : ehe::core::PrecisionMode::Mixed;
+        std::printf("[smoke] 精度模式由命令行指定：%s\n", options.precision.c_str());
+    }
     for (const std::string& warning : warnings) {
         std::fprintf(stderr, "[smoke][config] %s\n", warning.c_str());
     }
 
-    // 图像尺寸来自参数文件的 image 块（§6.1 固化 512²；开发期可用更小尺寸快速验证）
+    // 图像尺寸来自参数文件的 image 块（§6.1 固化 512²；开发期可用更小尺寸快速验证）。
+    // 用 core 的 read_image_size（内部已做 BOM 剥离 + 异常吞掉）：
+    // 踩坑：早期这里直接 `stream >> json`，配置文件为空时未捕获异常 → 进程 std::terminate
+    //      （退出码 0xC0000409 / -1073740791），而 Config::load_from_file 那边看起来"已经容错"。
     int image_width = 512;
     int image_height = 512;
-    {
-        std::ifstream stream(options.config_path);
-        if (stream) {
-            nlohmann::json json;
-            stream >> json;
-            if (json.contains("image")) {
-                image_width = json["image"].value("width", image_width);
-                image_height = json["image"].value("height", image_height);
-            }
-        }
-    }
+    ehe::core::Config::read_image_size(options.config_path, image_width, image_height);
 
     ehe::render::RendererConfig cfg{};
     cfg.backend = options.backend;
@@ -411,6 +418,12 @@ void draw_panel(const Options& options, ehe::core::Camera& camera, ehe::render::
 int run_window(const Options& options) {
     std::vector<std::string> warnings;
     ehe::core::Config config = ehe::core::Config::load_from_file(options.config_path, &warnings);
+    if (!options.precision.empty()) {
+        config.integrator.precision = (options.precision == "fp32")
+                                          ? ehe::core::PrecisionMode::Fp32
+                                          : ehe::core::PrecisionMode::Mixed;
+        std::printf("[main] 精度模式由命令行指定：%s\n", options.precision.c_str());
+    }
     for (const std::string& warning : warnings) {
         std::fprintf(stderr, "[main][config] %s\n", warning.c_str());
     }

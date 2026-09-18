@@ -163,13 +163,76 @@ try {
 Write-Report "脚本参数  : TimeoutSec=$TimeoutSec TryMixed=$($TryMixed.IsPresent) SkipLarge=$($SkipLarge.IsPresent) Windowed=$($Windowed.IsPresent)"
 Write-Report "包根目录  : $PackageRoot"
 
-$exe = Join-Path $PackageRoot "ehe.exe"
-$shaders = Join-Path $PackageRoot "shaders"
-$goldenDir = Join-Path $PackageRoot "tests\golden"
-if (-not (Test-Path $exe)) {
-    Write-Report "找不到 ehe.exe：请在解压后的包根目录运行本脚本，或用 -PackageRoot 指定路径"
+$exe = ""
+$shaders = ""
+$goldenDir = ""
+
+# 定位 ehe.exe：支持两种布局
+#   1) 便携包（推荐）：脚本与 ehe.exe 同层，shaders/ 与 tests/golden/ 也在同层
+#   2) 源码树（本机开发）：scripts/ 与 build/bin/、shaders/、tests/golden/ 并列
+function Find-ExeDir([string]$start) {
+    foreach ($dir in @($start, (Join-Path $start "build\bin"), (Join-Path $start "..\build\bin"),
+                       (Join-Path $start ".."), (Join-Path $start "..\.."))) {
+        if ([string]::IsNullOrWhiteSpace($dir)) { continue }
+        $full = [IO.Path]::GetFullPath($dir)
+        if (Test-Path (Join-Path $full "ehe.exe")) { return $full }
+    }
+    return ""
+}
+
+function Find-AssetRoot([string]$start) {
+    foreach ($dir in @($start, (Join-Path $start ".."), (Join-Path $start "..\.."),
+                       (Join-Path $start "..\..\.."))) {
+        if ([string]::IsNullOrWhiteSpace($dir)) { continue }
+        $full = [IO.Path]::GetFullPath($dir)
+        if (Test-Path (Join-Path $full "shaders\raymarch.frag")) { return $full }
+    }
+    return ""
+}
+
+$exeDir = Find-ExeDir $PackageRoot
+$assetRoot = Find-AssetRoot $PackageRoot
+if (-not [string]::IsNullOrWhiteSpace($exeDir)) {
+    $exe = Join-Path $exeDir "ehe.exe"
+}
+if (-not [string]::IsNullOrWhiteSpace($assetRoot)) {
+    $shaders = Join-Path $assetRoot "shaders"
+    $goldenDir = Join-Path $assetRoot "tests\golden"
+}
+
+if ([string]::IsNullOrWhiteSpace($exe) -or [string]::IsNullOrWhiteSpace($assetRoot)) {
+    Section "初始化失败：没有找到运行所需文件"
+    Write-Report "当前目录        : $((Get-Location).Path)"
+    Write-Report "脚本所在目录    : $PSScriptRoot"
+    Write-Report "传入的 -PackageRoot: $PackageRoot"
+    Write-Report ""
+    Write-Report "已查找 ehe.exe 的位置（均未命中）："
+    foreach ($dir in @($PackageRoot, (Join-Path $PackageRoot "build\bin"), (Join-Path $PackageRoot "..\build\bin"),
+                       (Join-Path $PackageRoot ".."), (Join-Path $PackageRoot "..\.."))) {
+        Write-Report "    $([IO.Path]::GetFullPath($dir))"
+    }
+    Write-Report "已查找 shaders\raymarch.frag 的位置（均未命中）："
+    foreach ($dir in @($PackageRoot, (Join-Path $PackageRoot ".."), (Join-Path $PackageRoot "..\.."))) {
+        Write-Report "    $([IO.Path]::GetFullPath($dir))"
+    }
+    Write-Report ""
+    Write-Report "当前目录下有什么："
+    Get-ChildItem -Force (Get-Location).Path | Select-Object -First 20 |
+        ForEach-Object { Write-Report ("    " + $_.Name + $(if ($_.PSIsContainer) { "\" } else { "" })) }
+    Write-Report ""
+    Write-Report "正确用法（二选一）："
+    Write-Report "  A. 便携包（推荐，无需编译）：解压 ehe-target-bundle.zip 后，在该目录运行"
+    Write-Report "       powershell -ExecutionPolicy Bypass -File .\run_target_tests.ps1"
+    Write-Report "     解压后应能看到：ehe.exe / ehe_reftool.exe / shaders\ / tests\golden\ / 本脚本"
+    Write-Report "  B. 源码树（本机开发）：在仓库根目录运行"
+    Write-Report "       powershell -ExecutionPolicy Bypass -File .\scripts\run_target_tests.ps1"
+    Write-Report "     （会自动识别 build\bin\ehe.exe）"
+    Write-Report "  C. 也可以用 -PackageRoot 显式指定：-PackageRoot D:\path\to\bundle"
     exit 1
 }
+
+Write-Report "可执行文件: $exe"
+Write-Report "资源根目录: $assetRoot（shaders 与 tests\golden 的来源）"
 $common = @("--shader-root=$shaders")
 
 # ---------------------------------------------------------------- 1. 能力探测
@@ -192,15 +255,19 @@ $sizes = @(
 )
 foreach ($size in $sizes) {
     $cfg = Join-Path $goldenDir $size.Cfg
-    # 目标机上强制 fp32（参数文件若为 mixed，会因 fp64 模拟而极慢）
-    $fp32Cfg = Join-Path $OutDir "params_fp32_$($size.Tag).json"
-    $json = [IO.File]::ReadAllText($cfg)
-    $json = $json -replace '"precision"\s*:\s*"mixed"', '"precision": "fp32"'
-    [IO.File]::WriteAllText($fp32Cfg, $json, $utf8NoBom)
+    if (-not (Test-Path $cfg)) {
+        Section ("2. 抹烟 " + $size.Note + "（fp32）→ NMSE 差分")
+        Write-Report "缺少参数文件，跳过该步：$cfg"
+        $failures++
+        continue
+    }
+    # 精度用命令行覆盖（--precision=fp32），**不再改写参数文件**：
+    # 早期版本会生成 params_fp32_*.json，一旦读源文件失败就会写出空文件，
+    # 再喂给 ehe.exe 触发 JSON 解析异常（已修，见 main.cpp 的 try/catch）。
     $shot = Join-Path $OutDir "shot_$($size.Tag)"
     $title = "2. 抹烟 " + $size.Note + "（fp32）→ NMSE 差分"
     $result = Invoke-Step -Title $title -Exe $exe `
-        -Arguments (@("--smoke", "--frames=1", "--shot=$shot", "--config=$fp32Cfg",
+        -Arguments (@("--smoke", "--frames=1", "--shot=$shot", "--config=$cfg", "--precision=fp32",
                       "--golden=$goldenDir\golden_$($size.Tag).pfm") + $common) -Timeout 600 -Tag "smoke_$($size.Tag)"
     if ($result.Code -ne 0) { $failures++ }
 }
@@ -208,24 +275,24 @@ foreach ($size in $sizes) {
 # ---------------------------------------------------------------- 3. 512x512 抹烟（DESIGN §6.1 固化参数）
 if (-not $SkipLarge) {
     $cfg = Join-Path $goldenDir "params.json"
-    $fp32Cfg = Join-Path $OutDir "params_fp32_512.json"
-    $json = [IO.File]::ReadAllText($cfg)
-    $json = $json -replace '"precision"\s*:\s*"mixed"', '"precision": "fp32"'
-    [IO.File]::WriteAllText($fp32Cfg, $json, $utf8NoBom)
-
     Section "3. 512x512 抹烟（fp32）——首次在该机跑，可能需数十秒到数分钟"
-    Write-Report "提示：Iris Xe 一类核显上，512x512、n_max=1000 的 fp32 单帧预计在数十秒量级；"
-    Write-Report "      超过 -TimeoutSec（当前 $TimeoutSec s）会判超时，可先用 -SkipLarge 看小尺寸。"
-    $shot = Join-Path $OutDir "shot_512_fp32"
-    $result = Invoke-Step -Title "3a. 512x512 抹烟（fp32）→ 与 golden.pfm 差分" -Exe $exe `
-        -Arguments (@("--smoke", "--frames=1", "--shot=$shot", "--config=$fp32Cfg",
-                      "--golden=$goldenDir\golden.pfm") + $common) -Timeout $TimeoutSec -Tag "smoke_512_fp32"
-    if ($result.Code -ne 0) { $failures++ }
+    if (-not (Test-Path $cfg)) {
+        Write-Report "缺少参数文件，跳过该步：$cfg"
+        $failures++
+    } else {
+        Write-Report "提示：Iris Xe 一类核显上，512x512、n_max=1000 的 fp32 单帧预计在数十秒量级；"
+        Write-Report "      超过 -TimeoutSec（当前 $TimeoutSec s）会判超时，可先用 -SkipLarge 看小尺寸。"
+        $shot = Join-Path $OutDir "shot_512_fp32"
+        $result = Invoke-Step -Title "3a. 512x512 抹烟（fp32）→ 与 golden.pfm 差分" -Exe $exe `
+            -Arguments (@("--smoke", "--frames=1", "--shot=$shot", "--config=$cfg", "--precision=fp32",
+                          "--golden=$goldenDir\golden.pfm") + $common) -Timeout $TimeoutSec -Tag "smoke_512_fp32"
+        if ($result.Code -ne 0) { $failures++ }
+    }
 
     if ($TryMixed) {
         $shotMixed = Join-Path $OutDir "shot_512_mixed"
         $result = Invoke-Step -Title "3b. 512x512 抹烟（mixed/fp64，预计极慢）" -Exe $exe `
-            -Arguments (@("--smoke", "--frames=1", "--shot=$shotMixed", "--config=$cfg",
+            -Arguments (@("--smoke", "--frames=1", "--shot=$shotMixed", "--config=$cfg", "--precision=mixed",
                           "--golden=$goldenDir\golden.pfm") + $common) -Timeout $TimeoutSec -Tag "smoke_512_mixed"
         if ($result.Code -ne 0) { $failures++ }
     } else {
