@@ -122,7 +122,7 @@ jobs:
           Copy-Item tests/golden/*.json dist/tests/golden/
           Copy-Item tests/golden/*.pfm  dist/tests/golden/
           Copy-Item tests/golden/*.png  dist/tests/golden/
-          Copy-Item tools/run_target_tests.ps1 dist/
+          Copy-Item scripts/run_target_tests.ps1 dist/
           Copy-Item docs/TARGET_MACHINE_TESTS.md dist/
           Compress-Archive -Path dist/* -DestinationPath ehe-target-bundle.zip -Force
           Get-ChildItem dist | Select-Object Name
