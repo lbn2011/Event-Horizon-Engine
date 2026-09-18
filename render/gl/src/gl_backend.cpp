@@ -98,6 +98,9 @@ public:
         shader_defines_ = cfg.shader_defines;
         render_width_ = cfg.render_width;
         render_height_ = cfg.render_height;
+        if (!cfg.shader_root.empty()) {
+            shader_root_ = cfg.shader_root;  // 必须在 build_pipeline 之前（见 IRenderer.h 说明）
+        }
         build_pipeline();  // 失败不致命：窗口与面板仍可用，错误经 last_error 暴露给 UI
         return true;
     }
@@ -169,6 +172,94 @@ public:
 
     const std::string& last_error() const override { return last_error_; }
 
+    void finish() override {
+        if (window_ != nullptr) {
+            glFinish();  // 仅探测/冒烟路径调用（DESIGN §5.4.1）
+        }
+    }
+
+    bool rebuild_pipeline(const std::vector<std::string>& shader_defines) override {
+        if (window_ == nullptr) {
+            last_error_ = "上下文未创建，无法重建管线";
+            return false;
+        }
+        shader_defines_ = shader_defines;
+        destroy_pipeline();
+        build_pipeline();
+        return pipeline_ready_;
+    }
+
+    std::string capability_report() const override {
+        if (window_ == nullptr) {
+            return "[GL] 上下文未创建";
+        }
+        auto get_string = [](GLenum name) -> const char* {
+            const auto* text = reinterpret_cast<const char*>(glGetString(name));
+            return (text != nullptr) ? text : "?";
+        };
+
+        std::string report;
+        char line[512] = {};
+        std::snprintf(line, sizeof(line), "[GL] version=%s\n[GL] renderer=%s\n[GL] vendor=%s\n[GL] glsl=%s\n",
+                      get_string(GL_VERSION), get_string(GL_RENDERER), get_string(GL_VENDOR),
+                      get_string(GL_SHADING_LANGUAGE_VERSION));
+        report += line;
+
+        // 关键扩展（core profile 必须用 glGetStringi 枚举）
+        const char* wanted[] = {"GL_ARB_gpu_shader_fp64", "GL_ARB_gpu_shader_int64",
+                                "GL_ARB_shader_storage_buffer_object", "GL_ARB_compute_shader",
+                                "GL_ARB_direct_state_access", "GL_ARB_shader_image_load_store",
+                                "GL_ARB_texture_filter_anisotropic", "GL_EXT_texture_filter_anisotropic"};
+        GLint extension_count = 0;
+        glGetIntegerv(GL_NUM_EXTENSIONS, &extension_count);
+        for (const char* name : wanted) {
+            bool found = false;
+            for (GLint i = 0; i < extension_count && !found; ++i) {
+                const auto* extension = reinterpret_cast<const char*>(glGetStringi(GL_EXTENSIONS, i));
+                found = (extension != nullptr) && (std::strcmp(extension, name) == 0);
+            }
+            std::snprintf(line, sizeof(line), "[GL] ext %-42s %s\n", name, found ? "YES" : "no");
+            report += line;
+        }
+
+        GLint max_texture = 0;
+        GLint max_ubo = 0;
+        GLint max_compute = 0;
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture);
+        glGetIntegerv(GL_MAX_UNIFORM_BLOCK_SIZE, &max_ubo);
+        glGetIntegerv(GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS, &max_compute);
+        std::snprintf(line, sizeof(line),
+                      "[GL] limits max_texture=%d max_uniform_block=%d max_compute_invocations=%d\n",
+                      max_texture, max_ubo, max_compute);
+        report += line;
+
+        // 功能性探测：FP16 颜色附件是否真的可用（我们的 HDR 目标正是 RGBA16F）
+        GLuint texture = 0;
+        GLuint framebuffer = 0;
+        glGenTextures(1, &texture);
+        glBindTexture(GL_TEXTURE_2D, texture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 16, 16, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glGenFramebuffers(1, &framebuffer);
+        GLint previous_fbo = 0;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous_fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+        const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(previous_fbo));
+        glDeleteFramebuffers(1, &framebuffer);
+        glDeleteTextures(1, &texture);
+        std::snprintf(line, sizeof(line), "[GL] rgba16f_color_attachment=%s (status=0x%04X)\n",
+                      (status == GL_FRAMEBUFFER_COMPLETE) ? "COMPLETE" : "INCOMPLETE", status);
+        report += line;
+
+        std::snprintf(line, sizeof(line), "[GL] pipeline_ready=%d\n", pipeline_ready_ ? 1 : 0);
+        report += line;
+        if (!pipeline_ready_ && !last_error_.empty()) {
+            report += "[GL] pipeline_error: " + last_error_ + "\n";
+        }
+        return report;
+    }
+
     bool capture_hdr(std::vector<float>& rgb, int& width, int& height) override {
         if (!pipeline_ready_ || fbo_ == 0 || internal_width_ <= 0 || internal_height_ <= 0) {
             return false;
@@ -237,6 +328,16 @@ private:
             last_error_ = vert.ok ? frag.error : vert.error;
             return false;
         }
+
+        std::string define_log = "（无，默认 mixed/fp64）";
+        if (!shader_defines_.empty()) {
+            define_log.clear();
+            for (const std::string& define : shader_defines_) {
+                define_log += define;
+                define_log += " ";
+            }
+        }
+        std::printf("[gl] 编译宏：%s\\n", define_log.c_str());
 
         if (vert.ok) {
             vert.source.text = insert_defines_after_version(vert.source.text, shader_defines_);

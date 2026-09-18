@@ -235,6 +235,76 @@ public:
 
     const std::string& last_error() const override { return last_error_; }
 
+    void finish() override {
+        if (device_ != VK_NULL_HANDLE) {
+            vkDeviceWaitIdle(device_);
+        }
+    }
+
+    /// 物理设备能力清单：T1.6 的实现选型依据（尤其 shaderFloat64 —— Intel 核显不原生支持，
+    /// 直接决定 Vulkan 侧能否走 mixed/fp64，见 DESIGN §7 精度模式）。
+    bool rebuild_pipeline(const std::vector<std::string>& shader_defines) override {
+        (void)shader_defines;
+        last_error_ = "Vulkan 的 raymarch 管线在 T1.6 落地，暂不支持重建";
+        return false;
+    }
+
+    std::string capability_report() const override {
+        std::string report;
+        if (instance_ == VK_NULL_HANDLE) {
+            return "[VK] instance 未创建（volk 初始化或驱动加载失败）\n";
+        }
+        std::uint32_t device_count = 0;
+        vkEnumeratePhysicalDevices(instance_, &device_count, nullptr);
+        char line[512] = {};
+        std::snprintf(line, sizeof(line), "[VK] physical_devices=%u\n", device_count);
+        report += line;
+        if (device_count == 0) {
+            report += "[VK] 无可用物理设备（未安装 Vulkan 运行时/驱动？）\n";
+            return report;
+        }
+
+        std::vector<VkPhysicalDevice> devices(device_count);
+        vkEnumeratePhysicalDevices(instance_, &device_count, devices.data());
+        for (std::uint32_t i = 0; i < device_count; ++i) {
+            VkPhysicalDeviceProperties properties{};
+            vkGetPhysicalDeviceProperties(devices[i], &properties);
+            VkPhysicalDeviceFeatures features{};
+            vkGetPhysicalDeviceFeatures(devices[i], &features);
+
+            const auto major = VK_VERSION_MAJOR(properties.apiVersion);
+            const auto minor = VK_VERSION_MINOR(properties.apiVersion);
+            const auto patch = VK_VERSION_PATCH(properties.apiVersion);
+            std::snprintf(line, sizeof(line), "[VK] [%u] name=%s\n[VK] [%u] apiVersion=%u.%u.%u\n",
+                          i, properties.deviceName, i, major, minor, patch);
+            report += line;
+            std::snprintf(line, sizeof(line),
+                          "[VK] [%u] driverVersion=0x%08X deviceType=%d vendorID=0x%04X deviceID=0x%04X\n",
+                          i, properties.driverVersion, static_cast<int>(properties.deviceType),
+                          properties.vendorID, properties.deviceID);
+            report += line;
+            std::snprintf(line, sizeof(line),
+                          "[VK] [%u] features.shaderFloat64=%d shaderInt64=%d shaderInt16=%d "
+                          "fragmentStoresAndAtomics=%d shaderStorageImageExtendedFormats=%d "
+                          "vertexPipelineStoresAndAtomics=%d\n",
+                          i, features.shaderFloat64 ? 1 : 0, features.shaderInt64 ? 1 : 0,
+                          features.shaderInt16 ? 1 : 0, features.fragmentStoresAndAtomics ? 1 : 0,
+                          features.shaderStorageImageExtendedFormats ? 1 : 0,
+                          features.vertexPipelineStoresAndAtomics ? 1 : 0);
+            report += line;
+            std::snprintf(line, sizeof(line),
+                          "[VK] [%u] limits maxComputeWorkGroupInvocations=%u "
+                          "maxComputeSharedMemorySize=%u maxStorageBufferRange=%u maxImageDimension2D=%u\n",
+                          i, properties.limits.maxComputeWorkGroupInvocations,
+                          properties.limits.maxComputeSharedMemorySize,
+                          properties.limits.maxStorageBufferRange,
+                          properties.limits.maxImageDimension2D);
+            report += line;
+        }
+        report += "[VK] 说明：T1.6 落地前 Vulkan 仅用于 M0 门禁（起窗 + 运行时切换），无 raymarch 管线\n";
+        return report;
+    }
+
     bool capture_hdr(std::vector<float>& rgb, int& width, int& height) override {
         (void)rgb;
         (void)width;

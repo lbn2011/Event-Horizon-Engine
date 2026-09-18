@@ -24,6 +24,11 @@ struct RendererConfig {
     int render_width = 0;
     int render_height = 0;
 
+    /// shader 搜索根目录（含 common/ 的 shaders 目录）。
+    /// **必须在 init 前设置**：GL 后端在 init 里就构建管线，init 之后设置已来不及
+    /// （踩坑：bundle 解压到任意目录后 CWD 没有 shaders/，--caps 因此报"无法打开 shader 文件"）。
+    std::string shader_root;
+
     /// 编译 shader 时注入的宏（在 `#version` 之后插入 `#define`）。
     /// 主要用途：`EHE_FP32_ONLY` —— 受限 GPU（无 fp64 硬件）上启用 fp32 精度路径（§4.3/§7）。
     std::vector<std::string> shader_defines;
@@ -84,6 +89,19 @@ public:
     /// @param width 内部分辨率宽
     /// @param height 内部分辨率高
     virtual bool capture_hdr(std::vector<float>& rgb, int& width, int& height) = 0;
+
+    /// 用新的 shader 宏重建管线（**不重建上下文**）。
+    /// 用途：--caps 的精度模式对比、T1.7 面板的运行时精度切换。
+    /// 注意：同一进程内反复创建 GL 上下文会失败（实测 glad 第二次加载返回 0），故必须走此路径。
+    virtual bool rebuild_pipeline(const std::vector<std::string>& shader_defines) = 0;
+
+    /// 后端能力清单（人类可读，供 --caps 采集与目标机报告）。
+    /// 内容：API 版本/设备名/关键扩展或设备特性/上限值；不含任何与本次参数相关的状态。
+    virtual std::string capability_report() const = 0;
+
+    /// 等待 GPU 完成（GL: glFinish；VK: queue wait idle）。
+    /// 用途：**仅冒烟/能力探测**需要真实帧耗时（DESIGN §5.4.1：正常路径靠 vsync，不主动同步）。
+    virtual void finish() = 0;
 };
 
 }  // namespace ehe::render

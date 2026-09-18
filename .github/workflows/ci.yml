@@ -108,6 +108,33 @@ jobs:
             artifacts/*.log
           if-no-files-found: error
 
+      # ---------------------------------------------------------------- 目标机便携包
+      # 为什么要它：目标机（如 Intel 核显笔记本）上不装编译器/工具链，直接跑 exe 即可。
+      #   exe 已静态链接（只依赖 Windows 系统 DLL），故包内只需 exe + shaders + golden 基线 + 脚本 + 指南。
+      - name: 组装目标机便携包（免编译，解压即用）
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item build/bin/ehe.exe dist/
+          Copy-Item build/bin/ehe_reftool.exe dist/
+          Copy-Item -Recurse shaders dist/shaders
+          New-Item -ItemType Directory -Force -Path dist/tests/golden | Out-Null
+          Copy-Item tests/golden/*.json dist/tests/golden/
+          Copy-Item tests/golden/*.pfm  dist/tests/golden/
+          Copy-Item tests/golden/*.png  dist/tests/golden/
+          Copy-Item scripts/run_target_tests.ps1 dist/
+          Copy-Item docs/TARGET_MACHINE_TESTS.md dist/
+          Compress-Archive -Path dist/* -DestinationPath ehe-target-bundle.zip -Force
+          Get-ChildItem dist | Select-Object Name
+          Write-Host "便携包大小: $([math]::Round((Get-Item ehe-target-bundle.zip).Length/1MB,2)) MB"
+
+      - name: 上传目标机便携包
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ehe-target-bundle
+          path: ehe-target-bundle.zip
+          if-no-files-found: error
+
       - name: 冒烟：GL 后端自检（CI runner 无独显，允许失败但不隐藏结果）
         shell: pwsh
         continue-on-error: true

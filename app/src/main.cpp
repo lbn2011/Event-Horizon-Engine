@@ -29,6 +29,7 @@
 #include <stb_image_write.h>
 
 #include "backend_factory.h"
+#include "caps.h"
 #include "ehe/core/camera.h"
 #include "ehe/core/config.h"
 #include "ehe/core/golden.h"
@@ -46,6 +47,9 @@ struct Options {
     int height = 720;
     bool vsync = true;
     bool try_backends = false;
+    bool caps = false;
+    bool time_mixed = false;
+    int probe_size = 64;
     bool smoke = false;
     int smoke_frames = 60;
     int window_frames = 0;  // 窗口模式限帧（0 = 不限），便于开发/CI 下有限步验证
@@ -117,13 +121,21 @@ Options parse_args(int argc, char** argv) {
             options.smoke = true;
         } else if (std::strcmp(arg, "--try-backends") == 0) {
             options.try_backends = true;
+        } else if (std::strcmp(arg, "--caps") == 0) {
+            options.caps = true;
+        } else if (std::strcmp(arg, "--time-mixed") == 0) {
+            options.time_mixed = true;
+        } else if (const char* v = value_of(arg, "--probe-size")) {
+            options.probe_size = parse_int(v, options.probe_size);
         } else if (std::strcmp(arg, "--help") == 0 || std::strcmp(arg, "-h") == 0) {
             std::printf(
                 "用法:\n"
                 "  ehe [--backend=gl|vk] [--width=N] [--height=N] [--vsync=0|1] [--shader-root=DIR]\n"
                 "  ehe --smoke [--frames=N=60] [--shot=BASE=out] [--config=PATH] [--golden=PATH.pfm]\n"
                 "            [--nmse=THRESHOLD=1e-3] [--backend=gl|vk]\n"
-                "  ehe --try-backends\n");
+                "  ehe --try-backends\n"
+                "  ehe --caps [--config=PATH] [--probe-size=N] [--time-mixed]\n");
+            std::exit(0);
             std::exit(0);
         } else {
             std::fprintf(stderr, "[main] 忽略未知参数 '%s'\n", arg);
@@ -198,6 +210,7 @@ int run_smoke(const Options& options) {
     cfg.title = "EHE smoke";
     cfg.vsync = false;
     cfg.visible = false;  // 离屏
+    cfg.shader_root = options.shader_root;
     cfg.render_width = image_width;    // 与 golden 严格同尺寸（窗口尺寸受系统最小值限制，不能依赖）
     cfg.render_height = image_height;
     if (config.integrator.precision == ehe::core::PrecisionMode::Fp32) {
@@ -223,6 +236,7 @@ int run_smoke(const Options& options) {
     // 2) 预热 N 帧后取末帧（§6.3）
     ehe::core::Camera camera(config.camera);
     const ehe::core::Vec3 forward = camera.forward();
+    double last_frame_ms = 0.0;
     ehe::render::SimParams params =
         ehe::render::make_sim_params(config, camera, forward, 1.0, 0.0);
     renderer->set_params(params);
@@ -231,13 +245,21 @@ int run_smoke(const Options& options) {
         const auto begin = std::chrono::steady_clock::now();
         renderer->begin_frame();
         renderer->end_frame();
+        // 必须 finish()：否则只测到**提交时间**。实测本机 32² fp32 提交 12.7 ms、真实 GPU 时间 254 ms，
+        // 差 20 倍——不同步的计时会把"很慢"误报成"很快"（DESIGN §5.4.1：仅冒烟/探测允许同步）。
+        renderer->finish();
         const double ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - begin)
                               .count();
-        std::fprintf(stderr, "[smoke] 预热帧 %d/%d 耗时 %.1f ms\n", frame + 1,
+        std::fprintf(stderr, "[smoke] 预热帧 %d/%d 耗时 %.1f ms（含 GPU 同步）\n", frame + 1,
                      std::max(1, options.smoke_frames), ms);
+        last_frame_ms = ms;
     }
 
+    std::printf("[smoke] 预热帧耗时 %.1f ms（%dx%d, n_max=%d, %s）\n", last_frame_ms, image_width,
+                image_height, config.integrator.n_max,
+                (config.integrator.precision == ehe::core::PrecisionMode::Fp32) ? "fp32"
+                                                                               : "mixed(fp64)");
     std::fprintf(stderr, "[smoke] 回读 HDR 结果...\n");
     std::vector<float> rgb;
     int width = 0;
@@ -401,6 +423,7 @@ int run_window(const Options& options) {
     cfg.height = options.height;
     cfg.title = "Event Horizon Engine";
     cfg.vsync = options.vsync;
+    cfg.shader_root = options.shader_root;
     if (config.integrator.precision == ehe::core::PrecisionMode::Fp32) {
         cfg.shader_defines.push_back("EHE_FP32_ONLY");
         std::printf("[main] 精度模式：fp32（EHE_FP32_ONLY）\n");
@@ -529,7 +552,14 @@ int main(int argc, char** argv) {
     std::printf("[main] GLFW: %s\n", glfwGetVersionString());
 
     int exit_code = 0;
-    if (options.try_backends) {
+    if (options.caps) {
+        ehe::app::CapOptions cap_options{};
+        cap_options.config_path = options.config_path;
+        cap_options.time_mixed = options.time_mixed;
+        cap_options.probe_size = options.probe_size;
+        cap_options.shader_root = options.shader_root;
+        exit_code = ehe::app::run_caps(cap_options);
+    } else if (options.try_backends) {
         exit_code = try_backends();
     } else if (options.smoke) {
         exit_code = run_smoke(options);
