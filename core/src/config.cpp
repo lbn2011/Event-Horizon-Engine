@@ -310,16 +310,59 @@ Config Config::from_json(const nlohmann::json& json, std::vector<std::string>* w
     return config;
 }
 
-Config Config::load_from_file(const std::string& path, std::vector<std::string>* warnings) {
-    std::ifstream stream(path);
+namespace {
+
+/// 读取文本文件并剥掉 UTF-8 BOM；文件不存在或为空返回 false。
+/// 为什么单独抽出来：BOM 与"空文件"是两类踩过的坑（记事本会写 BOM；脚本可能写出空文件），
+/// 必须只有一处实现，调用方**不要**再自己写 `stream >> json`。
+bool read_text_file_utf8(const std::string& path, std::string& text) {
+    std::ifstream stream(path, std::ios::binary);
     if (!stream) {
-        warn(warnings, "配置文件不存在，使用默认值：" + path);
-        return Config{};
+        return false;
     }
     std::stringstream buffer;
     buffer << stream.rdbuf();
+    text = buffer.str();
+    if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
+        static_cast<unsigned char>(text[1]) == 0xBB && static_cast<unsigned char>(text[2]) == 0xBF) {
+        text.erase(0, 3);  // Windows 记事本 / PS 5.1 的 Set-Content 会写 UTF-8 BOM
+    }
+    return !text.empty();
+}
+
+}  // namespace
+
+bool Config::read_image_size(const std::string& path, int& width, int& height) {
+    std::string text;
+    if (!read_text_file_utf8(path, text)) {
+        return false;
+    }
     try {
-        const nlohmann::json json = nlohmann::json::parse(buffer.str());
+        const nlohmann::json json = nlohmann::json::parse(text);
+        if (!json.contains("image")) {
+            return false;
+        }
+        const int parsed_width = json["image"].value("width", width);
+        const int parsed_height = json["image"].value("height", height);
+        if (parsed_width <= 0 || parsed_height <= 0) {
+            return false;
+        }
+        width = parsed_width;
+        height = parsed_height;
+        return true;
+    } catch (const std::exception&) {
+        return false;  // 绝不外抛：调用方按"用默认值"处理（踩过：外抛会让进程直接 abort）
+    }
+}
+
+Config Config::load_from_file(const std::string& path, std::vector<std::string>* warnings) {
+    std::string text;
+    if (!read_text_file_utf8(path, text)) {
+        warn(warnings, "配置文件不存在或为空，使用默认值：" + path);
+        return Config{};
+    }
+    try {
+        const nlohmann::json json = nlohmann::json::parse(text);
         return from_json(json, warnings);
     } catch (const std::exception& error) {
         warn(warnings, std::string("配置解析失败，使用默认值：") + error.what());
