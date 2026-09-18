@@ -185,6 +185,17 @@
 - PFM 行序必须统一（CPU 侧原写反 → NMSE≈1.8；修正后 1.6e-4）
 
 
+### T1.3 附带（目标机验证设施，2026-09-19 增补）—— ✅ 完成
+- [x] `ehe --caps`：能力探测（GL/VK 版本与设备、关键扩展/设备特性、rgba16f 附件功能性检查、
+      上限值；两种精度模式的可编译性 + fp32 帧耗时；`--time-mixed` 可选测 fp64）
+      - 踩坑记录：同进程二次创建 GL 上下文会失败 → 精度切换改走 `rebuild_pipeline`（T1.7 也复用）
+      - 安全策略：fp64 计时默认 **关闭**（无 fp64 硬件的 GPU 上实测会挂死驱动，只能强杀）
+- [x] **目标机便携包**（CI 产出 `ehe-target-bundle.zip`）：静态链接 exe + shaders + golden 基线 + 脚本 + 指南
+- [x] `tools/run_target_tests.ps1`：一键跑完（环境信息 → --caps → 小尺寸抹烟 → 512² 抹烟 → 后端探测），
+      全部输出落成 `target_report.txt` 单文件回传
+- [x] `docs/TARGET_MACHINE_TESTS.md`：目标机验证指南（含 Intel 核显的预期与判读表）
+- [x] 计时方法论修正：smoke 预热帧计时加入 `finish()` 同步（否则低估约 20 倍）
+
 ### T1.4 盘体渲染 + 相对论效应 ⛓T1.3
 - [ ] T1.4.1 通量剖面 + 高斯厚度 + 采样裁剪（§4.5）
 - [ ] T1.4.2 黑体 LUT 纹理绑定（binding 1）+ log(T) UV 映射

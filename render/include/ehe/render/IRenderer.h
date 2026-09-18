@@ -84,6 +84,19 @@ public:
     /// @param width 内部分辨率宽
     /// @param height 内部分辨率高
     virtual bool capture_hdr(std::vector<float>& rgb, int& width, int& height) = 0;
+
+    /// 用新的 shader 宏重建管线（**不重建上下文**）。
+    /// 用途：--caps 的精度模式对比、T1.7 面板的运行时精度切换。
+    /// 注意：同一进程内反复创建 GL 上下文会失败（实测 glad 第二次加载返回 0），故必须走此路径。
+    virtual bool rebuild_pipeline(const std::vector<std::string>& shader_defines) = 0;
+
+    /// 后端能力清单（人类可读，供 --caps 采集与目标机报告）。
+    /// 内容：API 版本/设备名/关键扩展或设备特性/上限值；不含任何与本次参数相关的状态。
+    virtual std::string capability_report() const = 0;
+
+    /// 等待 GPU 完成（GL: glFinish；VK: queue wait idle）。
+    /// 用途：**仅冒烟/能力探测**需要真实帧耗时（DESIGN §5.4.1：正常路径靠 vsync，不主动同步）。
+    virtual void finish() = 0;
 };
 
 }  // namespace ehe::render
