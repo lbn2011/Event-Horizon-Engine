@@ -226,7 +226,15 @@
       - capture_hdr 语义修正：PFM = "分辨率变换后、色调映射前"的输出分辨率 HDR（res_scale=1 时逐位不变）
 
 ### T1.6 Vulkan 后端对齐 ⛓T1.4, T1.5 —— 进行中（T1.6.2 已完成）
-- [ ] T1.6.1 VK 侧管线/描述符/同步（§5.4.1 对照表逐项）
+- [~] T1.6.1 VK 侧管线/描述符/同步（§5.4.1 对照表逐项）—— 进行中
+      - [x] **设备特性与精度策略**：init 时查询 `shaderFloat64` → 支持则显式启用（不启用会让 fp64 流水线创建失败），
+            不支持则规整宏为 `EHE_FP32_ONLY`；`effective_shader_defines()` 恒注入 `EHE_VULKAN`（抹平顶点内建名差异）。
+            `--caps` 已能报出该设备实际的 VK 精度策略
+      - [ ] shader 模块 + descriptor set layout（binding 0/1/2/3/4 与 GL 对齐）+ 4 条 graphics pipeline
+      - [ ] 离屏目标（HDR 内部 / HDR 输出 ×2 / LDR）+ image layout 屏障 + 4 pass 绘制链
+      - [ ] readback（capture_hdr / capture_ldr）+ pipeline_ready / rebuild_pipeline 落地
+      - 备注：开发机无 Vulkan ICD（`vulkan-1.dll` 缺失）→ 按 DESIGN §2.1 约定，本机只做编译期验证，
+        运行验证在目标机（Iris Xe，Vulkan 1.4.323 已实测可用）
 - [x] T1.6.2 glslang 库接入：启动时 GLSL→SPIR-V（含 include 展开后源码）
       - `render/src/spirv.cpp`：ShaderSource 展开 → 注入宏（`EHE_VULKAN` / `EHE_FP32_ONLY`）→ glslang（Vulkan 1.2 / SPIR-V 1.5）
       - **抓出跨 API 不兼容**：顶点序号内建在 VK 里叫 `gl_VertexIndex`（GL 是 `gl_VertexID`）→ 用宏 `EHE_VERTEX_INDEX` 抹平

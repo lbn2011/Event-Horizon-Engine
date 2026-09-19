@@ -252,8 +252,15 @@ public:
     /// 物理设备能力清单：T1.6 的实现选型依据（尤其 shaderFloat64 —— Intel 核显不原生支持，
     /// 直接决定 Vulkan 侧能否走 mixed/fp64，见 DESIGN §7 精度模式）。
     bool rebuild_pipeline(const std::vector<std::string>& shader_defines) override {
-        (void)shader_defines;
-        last_error_ = "Vulkan 的 raymarch 管线在 T1.6 落地，暂不支持重建";
+        // 记录规整后的宏（T1.6.1 的管线重建将直接使用它）：恒含 EHE_VULKAN，fp64 不可用时含 EHE_FP32_ONLY
+        requested_defines_ = effective_shader_defines(shader_defines);
+        std::string list;
+        for (const std::string& define : requested_defines_) {
+            list += define;
+            list += " ";
+        }
+        std::printf("[vk] 请求精度宏：%s\n", list.c_str());
+        last_error_ = "Vulkan 的 raymarch/后处理管线在 T1.6.1 落地，暂不支持重建";
         return false;
     }
 
@@ -309,7 +316,10 @@ public:
                           properties.limits.maxImageDimension2D);
             report += line;
         }
-        report += "[VK] 说明：T1.6 落地前 Vulkan 仅用于 M0 门禁（起窗 + 运行时切换），无 raymarch 管线\n";
+        report += shader_float64_supported_
+                      ? "[VK] 精度策略：mixed(fp64) 可用（已启用 shaderFloat64）\n"
+                      : "[VK] 精度策略：**强制 fp32**（该设备 shaderFloat64=0，fp64 流水线无法创建）\n";
+        report += "[VK] 说明：raymarch/后处理管线仍在 T1.6.1 落地中，当前 VK 仅用于起窗与能力探测\n";
         return report;
     }
 
@@ -442,12 +452,27 @@ private:
         queue_info.pQueuePriorities = &priority;
 
         const char* device_extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+
+        // ---- 设备特性：fp64 是"要么启用、要么绕开"的硬约束（DESIGN V5.10 约定③）----
+        // 查询 shaderFloat64：
+        //   - 支持 → 显式启用（**不启用的话 fp64 流水线在创建时就会失败**）；
+        //   - 不支持（如 Intel 核显实测 0）→ 记录并在编译 shader 时强制 EHE_FP32_ONLY，
+        //     否则 SPIR-V 里的 Float64 能力会让 vkCreateGraphicsPipelines 直接失败。
+        VkPhysicalDeviceFeatures supported_features{};
+        vkGetPhysicalDeviceFeatures(physical_device_, &supported_features);
+        shader_float64_supported_ = (supported_features.shaderFloat64 == VK_TRUE);
+
+        VkPhysicalDeviceFeatures enabled_features{};
+        enabled_features.shaderFloat64 = shader_float64_supported_ ? VK_TRUE : VK_FALSE;
+        // 采样器各向异性在本项目未使用；其余特性按需最小化，避免在不支持的设备上创建失败
+
         VkDeviceCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         info.queueCreateInfoCount = 1;
         info.pQueueCreateInfos = &queue_info;
         info.enabledExtensionCount = 1;
         info.ppEnabledExtensionNames = device_extensions;
+        info.pEnabledFeatures = &enabled_features;
 
         const VkResult result = vkCreateDevice(physical_device_, &info, nullptr, &device_);
         if (result != VK_SUCCESS) {
@@ -456,7 +481,30 @@ private:
         }
         volkLoadDevice(device_);
         vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
+        std::printf("[vk] 设备就绪：shaderFloat64=%s → 精度策略：%s\n",
+                    shader_float64_supported_ ? "YES" : "no",
+                    shader_float64_supported_ ? "可用 mixed(fp64)" : "强制 fp32（EHE_FP32_ONLY）");
         return true;
+    }
+
+    /// 把调用方给的宏规整为 VK 路径实际使用的集合：
+    ///   - 恒注入 `EHE_VULKAN`（抹平 gl_VertexIndex / gl_VertexID 差异，DESIGN V5.10 约定①）；
+    ///   - 设备不支持 fp64 时强制 `EHE_FP32_ONLY`（V5.10 约定③）。
+    std::vector<std::string> effective_shader_defines(const std::vector<std::string>& requested) const {
+        std::vector<std::string> defines = requested;
+        const auto ensure = [&defines](const char* name) {
+            for (const std::string& existing : defines) {
+                if (existing == name) {
+                    return;
+                }
+            }
+            defines.emplace_back(name);
+        };
+        ensure("EHE_VULKAN");
+        if (!shader_float64_supported_) {
+            ensure("EHE_FP32_ONLY");
+        }
+        return defines;
     }
 
     bool create_swapchain() {
@@ -834,10 +882,12 @@ private:
 
     SimParams params_{};
     std::string shader_root_;
+    std::vector<std::string> requested_defines_;  ///< 规整后的精度宏（含 EHE_VULKAN / 可能的 EHE_FP32_ONLY）
     std::string last_error_;
 
     GLFWwindow* window_ = nullptr;
     bool vsync_ = true;
+    bool shader_float64_supported_ = false;  ///< VK 设备是否支持 fp64（不支持则强制 fp32，V5.10 约定③）
 
     VkInstance instance_ = VK_NULL_HANDLE;
     VkSurfaceKHR surface_ = VK_NULL_HANDLE;
