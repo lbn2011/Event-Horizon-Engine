@@ -1,11 +1,11 @@
-# EHE 任务拆解 V1.13
+# EHE 任务拆解 V1.14
 
 > 执行清单，与 `DESIGN.md`（规格权威）配套使用。冲突时以 DESIGN.md 为准。
 > 每条任务：可勾选状态、验收标准、依赖、产出物。完成后勾 `[x]` 并注明日期。
 > 版本：V1.0（基于 DESIGN.md V5.1 拆出）→ V1.1（协作设施）→ V1.2（看板）→ V1.3（T0.1）
 > → V1.4（T0.2）→ V1.5（T0.3）→ V1.6（T0.4 + GL 能力勘误）→ V1.7（T1.1）
 > → V1.8（T1.2 度规内核/RK4/解析基准）→ V1.9（T1.2 完成）→ V1.10（T1.3 移植完成）→ V1.11（T1.3 目标机门禁通过）
-> → V1.12（T1.4 盘体湍流完成）→ V1.13（T1.5 后处理链完成，FSR1 待收尾）。
+> → V1.12（T1.4 盘体湍流完成）→ V1.13（T1.5 后处理链完成）→ V1.14（T1.6.2 SPIR-V 编译落地 + CI 覆盖）。
 
 图例：🏁 = 里程碑验收门；⛓ = 有前置依赖；产出物用 `代码格式` 标注。
 
@@ -225,9 +225,15 @@
       - **新增 post 一致性对照**：GPU 后处理成品 vs CPU 参考，三条分辨率路径实测 最大差 1/255
       - capture_hdr 语义修正：PFM = "分辨率变换后、色调映射前"的输出分辨率 HDR（res_scale=1 时逐位不变）
 
-### T1.6 Vulkan 后端对齐 ⛓T1.4, T1.5
+### T1.6 Vulkan 后端对齐 ⛓T1.4, T1.5 —— 进行中（T1.6.2 已完成）
 - [ ] T1.6.1 VK 侧管线/描述符/同步（§5.4.1 对照表逐项）
-- [ ] T1.6.2 glslang 库接入：启动时 GLSL→SPIR-V（含 include 展开后源码）
+- [x] T1.6.2 glslang 库接入：启动时 GLSL→SPIR-V（含 include 展开后源码）
+      - `render/src/spirv.cpp`：ShaderSource 展开 → 注入宏（`EHE_VULKAN` / `EHE_FP32_ONLY`）→ glslang（Vulkan 1.2 / SPIR-V 1.5）
+      - **抓出跨 API 不兼容**：顶点序号内建在 VK 里叫 `gl_VertexIndex`（GL 是 `gl_VertexID`）→ 用宏 `EHE_VERTEX_INDEX` 抹平
+      - **CI 覆盖**：5 shader × 2 精度全部断言编出合法 SPIR-V（魔数 + 字流非空）；负例（语法错/空源码）必须失败；
+        并断言 fp64 与 fp32 产物不同（精度开关真生效）——§6 L4 的"GPU 不进 CI"边界下，VK shader 路径已可被完全验证
+      - 实现要点：`glslang::glslang` 主库已含 SPIRV（ENABLE_OPT=OFF，无需 SPIRV-Tools）；
+        SPIRV 头路径是 `<SPIRV/GlslangToSpv.h>`（与 glslang 目录同级）
 - [ ] T1.6.3 面板后端切换：窗口句柄销毁重建 + Config 保留（§5.2）
 - [ ] T1.6.4 🏁 目标机双后端截图对比（§12 风险缓解）
 

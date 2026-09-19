@@ -1,4 +1,4 @@
-# Event Horizon Engine (EHE) — 开发文档 V5.9
+# Event Horizon Engine (EHE) — 开发文档 V5.10
 
 > **本文档是 EHE 项目开发的唯一权威依据。** 原始需求对话（`黑洞渲染模拟：Kerr度规光线....json`）仅为历史参考，
 > 凡本文档与对话冲突之处，以本文档为准。本文档不含代码；修改本文档需明确提出并递增版本号。
@@ -67,6 +67,17 @@
 >   三条分辨率路径实测 **最大差 1/255、平均差 0.03/255**；`capture_hdr` 语义修正为
 >   "分辨率变换之后、色调映射之前"的输出分辨率 HDR（res_scale=1 时与旧行为**逐位一致**）。
 >   FXAA/FSR1 不在此对照内（前者 GPU 专有、后者待 T1.5.2 收尾）。
+> V5.10（2026-09-19）：**T1.6.2 落地（GLSL→SPIR-V 运行时编译），并新增 3 条跨 API/CI 约定**：
+>   ① **顶点序号内建名两 API 不同**：OpenGL GLSL 是 `gl_VertexID`，**Vulkan GLSL 是 `gl_VertexIndex`**
+>      （由 SPIR-V 编译测试抓出，GL 下能跑、VK 下直接编不过）。约定：shader 侧用宏 `EHE_VERTEX_INDEX`，
+>      VK 路径编译时注入 `EHE_VULKAN` 抹平差异；其余内建（gl_FragCoord/texture/texelFetch/textureGather）同名，无需处理。
+>   ② **SPIR-V 编译进 CI**（§6 L4 的边界因此更严）：GLSL→SPIR-V 是**纯 CPU 行为**，
+>      故 VK 侧最易错的一环（绑定布局、std140、精度宏）可由 CI 全覆盖——5 个 shader × 2 种精度
+>      全部断言编出合法 SPIR-V（含魔数、字流非空），并断言 fp64/fp32 产物**不同**（精度开关真生效）。
+>      新增负例：语法错误/空源码必须失败且不产生字流。
+>   ③ **VK 侧精度必须运行时判定**：`shaderFloat64=0` 的设备（如 Intel 核显）**无法创建 fp64 流水线**，
+>      VK 后端需在 init 时查询该特性并在不支持时强制 `EHE_FP32_ONLY`（T1.6.1 实现要点）。
+>   另：`glslang` 的 SPIRV 目录与 `glslang` 目录**同级**（`<SPIRV/GlslangToSpv.h>`，不是 `<glslang/SPIRV/...>`）。
 
 ---
 
@@ -410,6 +421,8 @@ shaders/
 ├── post_resolve.frag    # 分辨率变换（SSAA 面积加权降采样 / Catmull-Rom 升频，V5.9）
 ├── post_fxaa.frag       # FXAA（HDR 适配：边缘判据用 Reinhard 压缩后的 luma）
 ├── post_final.frag      # 曝光 → ACES（Hill 拟合）→ 色差 → sRGB
+│   （双后端共用：GL 直接编译 GLSL 450；VK 经 render/spirv.cpp 编译为 SPIR-V 1.5，
+│     并注入 EHE_VULKAN 以抹平 gl_VertexIndex / gl_VertexID 的差异）
 ├── raymarch.frag        # 主积分循环 + 调试视图分支
 ├── particle.comp / particle.vert / particle.frag
 ├── post_fsr1_*.glsl     # FSR1 EASU/RCAS（GPUOpen 头文件）
