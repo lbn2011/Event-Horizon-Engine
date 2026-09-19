@@ -1,4 +1,4 @@
-# EHE 任务拆解 V1.18
+# EHE 任务拆解 V1.19
 
 > 执行清单，与 `DESIGN.md`（规格权威）配套使用。冲突时以 DESIGN.md 为准。
 > 每条任务：可勾选状态、验收标准、依赖、产出物。完成后勾 `[x]` 并注明日期。
@@ -9,6 +9,7 @@
 > → V1.15（T1.6.3 后端切换收尾）→ V1.16（T1.6.4 二轮真机诊断：图像内存未绑定根因修复 + 验证层接入）
 > → V1.17（T1.6.4 三轮真机验证：VK 建链成功 + 验证层 4 处合规问题修复）。
 > → V1.18（T1.6.4 四轮：VK 渲染尺寸与窗口解耦——离屏 LDR + blit 呈现，GL 同构方案）。
+> → V1.19（T1.6.4 五轮：解耦真机验证通过（输出 32×32 ✓）；交换链 usage 补 TRANSFER_DST）。
 
 图例：🏁 = 里程碑验收门；⛓ = 有前置依赖；产出物用 `代码格式` 标注。
 
@@ -282,6 +283,13 @@
       - ⏳ 等新包复跑：caps 无报错；VK smoke（--backend=vk --precision=fp32 --golden=golden_tiny.pfm）
         预期输出 **32×32**、NMSE 与 GL 同量级 → T1.6.4 收官、T1.6 关单；
         VK 性能计时用 `EHE_VK_VALIDATE=0`（验证层开销可观）
+      - 2026-09-20 五轮（#48）：#47 解耦真机验证通过（`渲染链输出 32x32（请求分辨率），
+        交换链 180x32（窗口）`，PFM 已是 32×32；离屏链屏障/布局全合规）；GL 三尺寸全过
+        （1.625e-04 / 1.760e-04 / 5.654e-04@3285ms）。唯一遗漏 = 交换链 imageUsage 仍
+        COLOR_ATTACHMENT-only，blit 目标需 TRANSFER_DST（VUID-vkCmdBlitImage-dstImage-00224），
+        非法 usage 下 GPU 行为未定义 → VK smoke NMSE=1.83；修复 = usage 按
+        supportedUsageFlags 择机 OR 上 TRANSFER_DST
+      - ⏳ 等新包复跑：caps 与 VK smoke 应零验证层报错；VK smoke NMSE 与 GL 同量级 → T1.6.4 收官、T1.6 关单
 
 ### T1.7 UI 完整化 ⛓T1.3
 - [ ] T1.7.1 面板 7 组全参数（§8 表逐项）+ 自旋 a 灰显锁定

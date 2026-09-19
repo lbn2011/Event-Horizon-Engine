@@ -1,4 +1,4 @@
-# Event Horizon Engine (EHE) — 开发文档 V5.15
+# Event Horizon Engine (EHE) — 开发文档 V5.16
 
 > **本文档是 EHE 项目开发的唯一权威依据。** 原始需求对话（`黑洞渲染模拟：Kerr度规光线....json`）仅为历史参考，
 > 凡本文档与对话冲突之处，以本文档为准。本文档不含代码；修改本文档需明确提出并递增版本号。
@@ -143,6 +143,16 @@
 >   开发机验证：编译零警告通过；68 用例/41861 断言全过；GL smoke 32×32 NMSE=1.625e-04 与基线
 >   同量级、两次运行 PNG 字节级一致（GL 代码零改动）。
 >   附注：VK 性能计时需 `EHE_VK_VALIDATE=0`（验证层在绘制路径有可观开销，四轮日志 75.8ms 含之）。
+> V5.16（2026-09-20 真机五轮）：**尺寸解耦真机验证通过 + 交换链 usage 补 TRANSFER_DST**。
+>   #47 真机复跑：`渲染链输出 32x32（请求分辨率），交换链 180x32（窗口）`——**输出尺寸解耦生效**
+>   （四轮的 180×32 污染消失），离屏 LDR/blit 呈现链的屏障与布局全部合规；GL 三尺寸 smoke 全过
+>   （tiny 1.625e-04 / small 1.760e-04 / 512 5.654e-04@3285ms，TDR 现象确认为环境随机性）。
+>   唯一遗漏：`create_swapchain` 的 `imageUsage` 仍是 COLOR_ATTACHMENT-only，而 record_present 的
+>   blit 目标需要 TRANSFER_DST（VUID-vkCmdBlitImage-dstImage-00224）——验证层对每张交换链图像报
+>   屏障/blit 共 3 类错误，且非法 usage 下 GPU 行为未定义，VK smoke NMSE=1.83（数值完全错误）。
+>   修复：usage 按需 OR 上 TRANSFER_DST（先查 surface caps.supportedUsageFlags，非规范保证项）。
+>   教训：#47 改"呈现方式"时只顾了离屏侧，呈现目标（交换链）的创建参数没跟着改——**改哪条
+>   数据通路，通路两端的资源创建参数都要过一遍**。
 
 ---
 
