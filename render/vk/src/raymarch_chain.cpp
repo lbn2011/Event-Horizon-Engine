@@ -6,7 +6,7 @@
 //   GL_TEXTURE_2D + GL_LINEAR 采样         VkImage + VkImageView + VkSampler（combined image sampler）
 //   UBO binding 0/3/4                      descriptor set 的 binding 0/3/4（同一套编号，便于 shader 共用）
 //   全屏三角形（gl_VertexID）              全屏三角形（gl_VertexIndex，由 EHE_VULKAN 宏抹平）
-//   默认帧缓冲 + glBlitFramebuffer         直接画进交换链的 render pass（无需 blit pass）
+//   final_fbo + glBlitFramebuffer          离屏 LDR 图 + vkCmdBlitImage（record_present）
 //
 // 首版取舍：离屏图像统一 GENERAL 布局（免布局过渡，只需内存屏障）；每个 pass 的 UBO 按
 // frames-in-flight 各一份，避免 CPU 写/GPU 读竞争。
@@ -88,6 +88,14 @@ struct RaymarchChain::Impl {
     std::array<VkImageView, 2> out_views{};
     std::array<VkDeviceMemory, 2> out_memories{};
 
+    // 离屏 LDR 目标（final 的画布，输出分辨率 = 请求分辨率；交换链格式）。
+    // 与 GL 的 final_fbo_ 同构：渲染尺寸与窗口解耦，呈现经 blit 拉伸，读回从这里走。
+    VkImage ldr_image = VK_NULL_HANDLE;
+    VkImageView ldr_view = VK_NULL_HANDLE;
+    VkDeviceMemory ldr_memory = VK_NULL_HANDLE;
+    VkRenderPass ldr_pass = VK_NULL_HANDLE;
+    VkFramebuffer ldr_framebuffer = VK_NULL_HANDLE;
+
     // 黑体 LUT + 采样器
     VkImage lut_image = VK_NULL_HANDLE;
     VkImageView lut_view = VK_NULL_HANDLE;
@@ -106,7 +114,7 @@ struct RaymarchChain::Impl {
     std::array<VkDeviceMemory, kFramesInFlight> final_memories{};
     std::array<void*, kFramesInFlight> final_mapped{};
 
-    // 本帧 final pass 的输入（在 record_offscreen 末尾确定，供 record_final_in_pass 使用）
+    // 本帧 final pass 的输入（在 record_offscreen 末尾确定，供 record_final 使用）
     VkImageView last_final_source_ = VK_NULL_HANDLE;
     VkImage last_final_source_image_ = VK_NULL_HANDLE;
 
@@ -424,6 +432,71 @@ bool RaymarchChain::init(const ChainInitInfo& info) {
         }
     }
 
+    // ---- 离屏 LDR 目标（输出分辨率 = 请求分辨率；格式 = 交换链格式，blit 免转换）----
+    {
+        const VkImageUsageFlags ldr_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                            VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        if (!impl_->create_image(output.width, output.height, info.swapchain_format, ldr_usage,
+                                 impl_->ldr_image, impl_->ldr_memory) ||
+            !impl_->create_view(impl_->ldr_image, info.swapchain_format, impl_->ldr_view)) {
+            last_error_ = "创建离屏 LDR 图像失败";
+            return false;
+        }
+
+        // final 专用的 render pass：布局约定与 HDR 图一致（GENERAL 进出，免过渡）；
+        // 每帧全覆盖，loadOp=DONT_CARE。与交换链 render pass 彻底解耦——交换链重建不再牵连链。
+        VkAttachmentDescription color{};
+        color.format = info.swapchain_format;
+        color.samples = VK_SAMPLE_COUNT_1_BIT;
+        color.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        color.initialLayout = VK_IMAGE_LAYOUT_GENERAL;
+        color.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkAttachmentReference reference{0, VK_IMAGE_LAYOUT_GENERAL};
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &reference;
+
+        VkSubpassDependency dependency{};
+        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.srcAccessMask = 0;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+        VkRenderPassCreateInfo pass_create{};
+        pass_create.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        pass_create.attachmentCount = 1;
+        pass_create.pAttachments = &color;
+        pass_create.subpassCount = 1;
+        pass_create.pSubpasses = &subpass;
+        pass_create.dependencyCount = 1;
+        pass_create.pDependencies = &dependency;
+        if (vkCreateRenderPass(info.device, &pass_create, nullptr, &impl_->ldr_pass) != VK_SUCCESS) {
+            last_error_ = "创建 LDR render pass 失败";
+            return false;
+        }
+
+        VkFramebufferCreateInfo framebuffer{};
+        framebuffer.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        framebuffer.renderPass = impl_->ldr_pass;
+        framebuffer.attachmentCount = 1;
+        framebuffer.pAttachments = &impl_->ldr_view;
+        framebuffer.width = output.width;
+        framebuffer.height = output.height;
+        framebuffer.layers = 1;
+        if (vkCreateFramebuffer(info.device, &framebuffer, nullptr, &impl_->ldr_framebuffer) !=
+            VK_SUCCESS) {
+            last_error_ = "创建 LDR framebuffer 失败";
+            return false;
+        }
+    }
+
     // ---- 采样器 ----
     {
         // LUT：线性过滤（与 core 的插值一致）；若设备不支持 32 位浮点线性过滤则退化为最近邻并告警
@@ -536,12 +609,12 @@ bool RaymarchChain::init(const ChainInitInfo& info) {
         std::string upload_err;
         const bool uploaded = impl_->submit_one_shot(
             [&](VkCommandBuffer cmd) {
-                // 首次使用前过渡：4 张图（HDR×3 + LUT）从 UNDEFINED → GENERAL。
+                // 首次使用前过渡：5 张图（HDR×3 + LDR + LUT）从 UNDEFINED → GENERAL。
                 // 之后离屏链沿用"GENERAL 免过渡"约定，只需 pass 间写后读屏障。
-                VkImage images[4] = {impl_->internal_image, impl_->out_images[0],
-                                     impl_->out_images[1], impl_->lut_image};
-                VkImageMemoryBarrier barriers[4] = {};
-                for (int i = 0; i < 4; ++i) {
+                VkImage images[5] = {impl_->internal_image, impl_->out_images[0],
+                                     impl_->out_images[1], impl_->ldr_image, impl_->lut_image};
+                VkImageMemoryBarrier barriers[5] = {};
+                for (int i = 0; i < 5; ++i) {
                     barriers[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
                     barriers[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
                     barriers[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -552,7 +625,7 @@ bool RaymarchChain::init(const ChainInitInfo& info) {
                 }
                 vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-                                     nullptr, 4, barriers);
+                                     nullptr, 5, barriers);
                 VkBufferImageCopy region{};
                 region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
                 region.imageExtent = {static_cast<std::uint32_t>(count), 1, 1};
@@ -725,9 +798,8 @@ bool RaymarchChain::init(const ChainInitInfo& info) {
             create.pColorBlendState = &blend;
             create.pDynamicState = &dynamic;
             create.layout = impl_->pipeline_layout;
-            // final 画进交换链（复用后端已有的 render pass）；其余 3 个画进 HDR pass
-            create.renderPass =
-                (pass == kPassFinal) ? info.swapchain_render_pass : impl_->hdr_pass;
+            // final 画进离屏 LDR 目标；其余 3 个画进 HDR pass（呈现经 blit，见 record_present）
+            create.renderPass = (pass == kPassFinal) ? impl_->ldr_pass : impl_->hdr_pass;
             if (vkCreateGraphicsPipelines(info.device, VK_NULL_HANDLE, 1, &create, nullptr,
                                            &impl_->pipelines[static_cast<std::size_t>(pass)]) !=
                 VK_SUCCESS) {
@@ -872,6 +944,11 @@ void RaymarchChain::destroy() {
         vkDestroyImageView(device, impl_->internal_view, nullptr);
         vkDestroyImage(device, impl_->internal_image, nullptr);
         vkFreeMemory(device, impl_->internal_memory, nullptr);
+        vkDestroyFramebuffer(device, impl_->ldr_framebuffer, nullptr);
+        vkDestroyRenderPass(device, impl_->ldr_pass, nullptr);
+        vkDestroyImageView(device, impl_->ldr_view, nullptr);
+        vkDestroyImage(device, impl_->ldr_image, nullptr);
+        vkFreeMemory(device, impl_->ldr_memory, nullptr);
         for (VkFramebuffer framebuffer : impl_->hdr_framebuffers) {
             vkDestroyFramebuffer(device, framebuffer, nullptr);
         }
@@ -998,12 +1075,12 @@ void RaymarchChain::record_offscreen(VkCommandBuffer cmd, std::uint32_t frame_sl
         source_view = impl_->out_views[static_cast<std::size_t>(target)];
     }
 
-    // final pass 的输入在这里确定（final 在交换链 render pass 内录制，见 record_final_in_pass）
+    // final pass 的输入在这里确定（final 画进离屏 LDR 目标，见 record_final）
     impl_->last_final_source_ = source_view;
     impl_->last_final_source_image_ = source_image;
 }
 
-void RaymarchChain::record_final_in_pass(VkCommandBuffer cmd, std::uint32_t frame_slot, bool aces) {
+void RaymarchChain::record_final(VkCommandBuffer cmd, std::uint32_t frame_slot, bool aces) {
     if (!ready_) {
         return;
     }
@@ -1019,9 +1096,19 @@ void RaymarchChain::record_final_in_pass(VkCommandBuffer cmd, std::uint32_t fram
     write.pImageInfo = &input;
     vkUpdateDescriptorSets(impl_->info.device, 1, &write, 0, nullptr);
 
-    VkViewport viewport{0.0F, 0.0F, static_cast<float>(impl_->info.output_extent.width),
-                        static_cast<float>(impl_->info.output_extent.height), 0.0F, 1.0F};
-    VkRect2D scissor{{0, 0}, impl_->info.output_extent};
+    // final 画进自己的离屏 LDR pass（ GENERAL → GENERAL，免布局过渡）
+    const VkExtent2D output = impl_->info.output_extent;
+    VkRenderPassBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    begin.renderPass = impl_->ldr_pass;
+    begin.framebuffer = impl_->ldr_framebuffer;
+    begin.renderArea.offset = {0, 0};
+    begin.renderArea.extent = output;
+    vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
+
+    VkViewport viewport{0.0F, 0.0F, static_cast<float>(output.width),
+                        static_cast<float>(output.height), 0.0F, 1.0F};
+    VkRect2D scissor{{0, 0}, output};
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, impl_->pipelines[kPassFinal]);
@@ -1029,6 +1116,71 @@ void RaymarchChain::record_final_in_pass(VkCommandBuffer cmd, std::uint32_t fram
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, impl_->pipeline_layout, 0, 1, &set,
                             0, nullptr);
     vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cmd);
+
+    // LDR 图的写入对后续 blit（TRANSFER 读）可见：写后读屏障（GENERAL → GENERAL）
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = impl_->ldr_image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+}
+
+void RaymarchChain::record_present(VkCommandBuffer cmd, VkImage dst_image, VkExtent2D dst_extent) {
+    if (!ready_ || dst_image == VK_NULL_HANDLE) {
+        return;
+    }
+    const VkExtent2D output = impl_->info.output_extent;
+
+    // 交换链图像 acquire 后布局未定义：先过渡到 TRANSFER_DST_OPTIMAL。
+    // srcStage 取 COLOR_ATTACHMENT_OUTPUT，与呈现信号量的等待阶段（pWaitDstStageMask）对齐，
+    // 保证图像真正可用之后才执行过渡。
+    VkImageMemoryBarrier to_dst{};
+    to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_dst.image = dst_image;
+    to_dst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    to_dst.srcAccessMask = 0;
+    to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &to_dst);
+
+    // 线性拉伸 blit：请求分辨率（LDR）→ 窗口尺寸（交换链）。与 GL 的 glBlitFramebuffer 同构。
+    VkImageBlit blit{};
+    blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    blit.srcOffsets[1] = {static_cast<std::int32_t>(output.width),
+                          static_cast<std::int32_t>(output.height), 1};
+    blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    blit.dstOffsets[1] = {static_cast<std::int32_t>(dst_extent.width),
+                          static_cast<std::int32_t>(dst_extent.height), 1};
+    vkCmdBlitImage(cmd, impl_->ldr_image, VK_IMAGE_LAYOUT_GENERAL, dst_image,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+
+    // 交换链图像过渡到 COLOR_ATTACHMENT_OPTIMAL，供随后的交换链 render pass（ImGui）使用；
+    // pass 的 finalLayout=PRESENT_SRC_KHR 会接手最后一次过渡。
+    VkImageMemoryBarrier to_color{};
+    to_color.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_color.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_color.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    to_color.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_color.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_color.image = dst_image;
+    to_color.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    to_color.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    to_color.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr,
+                         1, &to_color);
 }
 
 // ---------------------------------------------------------------- 读回
@@ -1066,32 +1218,42 @@ bool RaymarchChain::read_hdr(std::vector<float>& out, int& width, int& height) {
     return true;
 }
 
-bool RaymarchChain::read_ldr(VkImage swapchain_image, std::vector<unsigned char>& out, int& width,
-                             int& height) {
-    if (!ready_ || swapchain_image == VK_NULL_HANDLE) {
+bool RaymarchChain::read_ldr(std::vector<unsigned char>& out, int& width, int& height) {
+    if (!ready_) {
         return false;
     }
     width = static_cast<int>(impl_->info.output_extent.width);
     height = static_cast<int>(impl_->info.output_extent.height);
 
+    // 从离屏 LDR 图读回（GENERAL 布局，带 TRANSFER_SRC 用途）——
+    // 不再从交换链回读：交换链图像无 TRANSFER_SRC 用途、PRESENT_SRC 布局不可作拷贝源
+    //（真机验证层两处报错的根源，2026-09-19）
     const bool copied = impl_->submit_one_shot([&](VkCommandBuffer cmd) {
         VkBufferImageCopy region{};
         region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         region.imageExtent = {static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), 1};
-        vkCmdCopyImageToBuffer(cmd, swapchain_image, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        vkCmdCopyImageToBuffer(cmd, impl_->ldr_image, VK_IMAGE_LAYOUT_GENERAL,
                                impl_->readback_buffer, 1, &region);
     });
     if (!copied) {
         return false;
     }
 
-    // 交换链格式为 B8G8R8A8_UNORM（后端已选定）→ 转 RGB
+    // 离屏 LDR 图格式 = 交换链格式（多数设备 B8G8R8A8，少数 R8G8B8A8）→ 按实际通道序转 RGB
+    const VkFormat format = impl_->info.swapchain_format;
+    const bool bgra = (format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB);
     out.assign(static_cast<std::size_t>(3) * width * height, 0);
     const auto* source_pixels = static_cast<const unsigned char*>(impl_->readback_mapped);
     for (std::size_t i = 0; i < static_cast<std::size_t>(width) * height; ++i) {
-        out[i * 3 + 0] = source_pixels[i * 4 + 2];  // R ← B 通道
-        out[i * 3 + 1] = source_pixels[i * 4 + 1];
-        out[i * 3 + 2] = source_pixels[i * 4 + 0];  // B ← R 通道
+        if (bgra) {
+            out[i * 3 + 0] = source_pixels[i * 4 + 2];  // R ← B 通道
+            out[i * 3 + 1] = source_pixels[i * 4 + 1];
+            out[i * 3 + 2] = source_pixels[i * 4 + 0];  // B ← R 通道
+        } else {
+            out[i * 3 + 0] = source_pixels[i * 4 + 0];
+            out[i * 3 + 1] = source_pixels[i * 4 + 1];
+            out[i * 3 + 2] = source_pixels[i * 4 + 2];
+        }
     }
     return true;
 }
