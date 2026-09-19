@@ -234,6 +234,8 @@ void main() {
         }
     }
 
-    // HDR 原始输出（FP16 附件）：色调映射在后处理链（T1.5）进行
-    out_color = vec4(output_rgb, 1.0);
+    // HDR 原始输出（FP16 附件）：色调映射在后处理链（T1.5）进行。
+    // alpha = 实际积分步数（V5.18：供监控 overlay 统计平均步数；RGB 不受影响、
+    // 不进 PFM 差分；fp16 精确表示 ≤2048 的整数，与 EHE_MAX_STEPS 上限一致）
+    out_color = vec4(output_rgb, float(step_used));
 }

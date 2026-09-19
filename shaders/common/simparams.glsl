@@ -19,7 +19,8 @@ layout(std140, binding = 0) uniform SimParams {
     vec4 steps;          // [6]  x = h_min, y = h_max, z = eps_h, w = r_escape
     vec4 hole;           // [7]  x = spin_a, y = r_in, z = r_out, w = disk_density
     vec4 disk;           // [8]  x = t_scale, y = kappa, z = exposure, w = chrom_ab
-    uvec4 flags;         // [9]  x = 位标志, y = res_scale, z = particle_count, w = 保留
+    uvec4 flags;         // [9]  x = 位标志, y = res_scale, z = particle_count,
+                         //      w = particle_size（uintBitsToFloat 解包；V5.18 启用原 pad 槽位）
     vec4 extras;         // [10] x = emission_scale, y = thickness_scale, z = debug_view,
                          //      w = disk_noise（盘湍流噪声振幅，0 = 关闭；V5.8 追加）
 };
@@ -31,6 +32,8 @@ layout(std140, binding = 0) uniform SimParams {
 #define EHE_FLAG_PARTICLE      (1u << 3)
 #define EHE_FLAG_FP32_ONLY     (1u << 4)
 #define EHE_FLAG_DISK_ENABLED  (1u << 5)
+#define EHE_FLAG_PARTICLE_ENABLED (1u << 6)
+#define EHE_FLAG_ANIMATE          (1u << 7)
 
 // 调试视图编号（与 C++ 侧 ehe::render::DebugView 一致）
 #define EHE_VIEW_SHADED      0

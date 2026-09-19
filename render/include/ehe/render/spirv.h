@@ -22,6 +22,23 @@ struct SpirvResult {
     std::vector<std::uint32_t> words; ///< SPIR-V 字流（首字为魔数 0x07230203）
 };
 
+/// 编译目标阶段（V5.18：粒子 compute shader 加入，T1.8.1）
+enum class ShaderStage { Vertex, Fragment, Compute };
+
+/// 把 GLSL 源码编译为 SPIR-V（通用入口，阶段用枚举表达）。
+/// @param source   已是**展开过 include** 的源码（ShaderSource 的输出）
+/// @param stage    编译目标阶段
+/// @param defines  额外宏（在 `#version` 之后插入，如 {"EHE_FP32_ONLY"}）
+SpirvResult compile_glsl_to_spirv_stage(const std::string& source, ShaderStage stage,
+                                        const std::vector<std::string>& defines = {});
+
+/// 通用入口的文件版（含 include 展开 + 宏注入）。
+/// @param path   入口 shader 路径
+/// @param roots  include 搜索根（除入口文件所在目录外）
+SpirvResult compile_shader_file_stage(const std::string& path, const std::vector<std::string>& roots,
+                                      ShaderStage stage,
+                                      const std::vector<std::string>& defines = {});
+
 /// 把 GLSL 源码编译为 SPIR-V。
 /// @param source        已是**展开过 include** 的源码（ShaderSource 的输出）
 /// @param fragment_stage true = 片元阶段，false = 顶点阶段

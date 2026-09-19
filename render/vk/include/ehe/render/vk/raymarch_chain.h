@@ -64,6 +64,18 @@ public:
     /// 是否做了分辨率变换（res_scale != 1）——影响 FXAA 的输入与读回目标
     bool resolved() const { return resolved_; }
 
+    /// 内部分辨率（实际渲染发生处；IRenderer::render_resolution 的数据源）。
+    /// 链未就绪时返回 false 且不写输出。
+    bool internal_extent(std::uint32_t& width, std::uint32_t& height) const;
+
+    /// 最近一帧 GPU 耗时（毫秒；timestamp query，天然 1 帧延迟）。
+    /// 设备不支持时间戳或尚无结果时返回负值（overlay 显示 n/a）。
+    double gpu_frame_ms() const;
+
+    /// raymarch 平均步数（alpha 通道逐级 blit 归约到 1×1，低频更新）。
+    /// 粒子模式（跳过 raymarch）或尚未积累时返回负值。
+    double last_avg_steps() const;
+
     /// 录制 3 个**离屏** pass（raymarch → resolve → fxaa）。
     /// @param frame_slot 0..frames_in_flight-1（选择对应那份 UBO）
     /// @param res_scale  当前内部分辨率档（决定是否做分辨率变换）

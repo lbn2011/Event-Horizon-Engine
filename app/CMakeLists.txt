@@ -10,6 +10,7 @@ add_executable(ehe_app
   src/main.cpp
   src/backend_factory.cpp
   src/caps.cpp
+  src/audio.cpp
   "${CMAKE_SOURCE_DIR}/third_party/stb_impl.c"
 )
 

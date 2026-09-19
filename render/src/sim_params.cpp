@@ -85,6 +85,9 @@ SimParams make_sim_params(const core::Config& config, const core::Camera& camera
     if (config.render.mode == core::RenderMode::Particle) {
         flags |= kFlagParticle;
     }
+    if (config.particle.enabled) {
+        flags |= kFlagParticleEnabled;
+    }
     if (config.integrator.precision == core::PrecisionMode::Fp32) {
         flags |= kFlagFp32Only;
     }
@@ -94,6 +97,8 @@ SimParams make_sim_params(const core::Config& config, const core::Camera& camera
     params.flags[0] = flags;
     params.flags[1] = pack_float(static_cast<float>(config.render.res_scale));   // 位打包（见头文件说明）
     params.flags[2] = pack_float(static_cast<float>(config.particle.count));
+    // V5.18：flags.w 启用原 pad 槽位携带粒子大小（§5.6 面板「大小」，默认 1.0）
+    params.flags[3] = pack_float(static_cast<float>(config.particle.size));
 
     params.extras[0] = 2.5F;    // emission_scale：V5.4 的数值归一（与 golden 默认一致）
     params.extras[1] = 0.1F;    // thickness_scale：σ_d = 0.1·r（§4.5）

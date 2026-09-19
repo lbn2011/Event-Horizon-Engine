@@ -205,6 +205,45 @@ TEST_CASE("shader: raymarch.frag 在 mixed(fp64) 与 fp32 两种精度下均通�
     CHECK(fp32.parsed);
 }
 
+TEST_CASE("shader: 粒子三件套通过 glslang 解析（T1.8.1：compute / 点精灵 vert+frag）") {
+    const std::string root = find_shader_root();
+    REQUIRE_FALSE(root.empty());
+
+    const std::vector<std::string> roots = {root, "shaders"};
+    const ehe::render::ShaderLoadResult comp =
+        ehe::render::load_shader(root + "/particle_update.comp", roots);
+    const ehe::render::ShaderLoadResult vert =
+        ehe::render::load_shader(root + "/particle_draw.vert", roots);
+    const ehe::render::ShaderLoadResult frag =
+        ehe::render::load_shader(root + "/particle_draw.frag", roots);
+    REQUIRE(comp.ok);
+    REQUIRE(vert.ok);
+    REQUIRE(frag.ok);
+
+    glslang::InitializeProcess();
+    const ParseResult comp_result = parse_glsl(comp.source.text, EShLangCompute, "particle_update.comp");
+    const ParseResult vert_result = parse_glsl(vert.source.text, EShLangVertex, "particle_draw.vert");
+    const ParseResult frag_result =
+        parse_glsl(frag.source.text, EShLangFragment, "particle_draw.frag");
+    glslang::FinalizeProcess();
+
+    if (!comp_result.parsed) {
+        std::fprintf(stderr, "[shader-test] particle_update.comp 解析失败：\n%s\n",
+                     comp_result.log.c_str());
+    }
+    if (!vert_result.parsed) {
+        std::fprintf(stderr, "[shader-test] particle_draw.vert 解析失败：\n%s\n",
+                     vert_result.log.c_str());
+    }
+    if (!frag_result.parsed) {
+        std::fprintf(stderr, "[shader-test] particle_draw.frag 解析失败：\n%s\n",
+                     frag_result.log.c_str());
+    }
+    CHECK(comp_result.parsed);
+    CHECK(vert_result.parsed);
+    CHECK(frag_result.parsed);
+}
+
 TEST_CASE("simparams: UBO 镜像与 §5.3 布局一致（std140，11 个 vec4）") {
     using ehe::render::SimParams;
     CHECK(sizeof(SimParams) == 176);

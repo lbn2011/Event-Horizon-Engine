@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <thread>
 
 #include <nlohmann/json.hpp>
 #include <memory>
@@ -28,6 +29,7 @@
 #include <imgui.h>
 #include <stb_image_write.h>
 
+#include "audio.h"
 #include "backend_factory.h"
 #include "caps.h"
 #include "ehe/core/camera.h"
@@ -62,6 +64,14 @@ struct Options {
     double time = 0.0;             // 动画时间（秒）。smoke 用它做确定性输入；窗口模式作为起始偏移
     bool animation = true;         // 窗口模式是否让 time 随实际时间推进（smoke 恒为固定值）
     double nmse_threshold = 1e-3;  // DESIGN §6.2 初值
+    std::string persist_path = "ehe.config.json";  // 会话持久化（§8.1：退出/切后端保存）
+};
+
+/// 窗口模式 UI 状态（不进 Config schema 的运行时量）
+struct UiState {
+    bool show_overlay = true;   ///< 监控 overlay 独立开关（§8）
+    int fly_speed = 1;          ///< 自由飞行速度档（§4.7：慢/中/快三档）
+    bool rebuild_requested = false;  ///< 精度模式等需要重建管线的改动
 };
 
 int parse_int(const char* text, int fallback) {
@@ -393,24 +403,71 @@ int run_smoke(const Options& options) {
 
 // ---------------------------------------------------------------- 窗口模式
 
+/// 自由飞行速度档（§4.7：慢/中/快三档，单位/秒）
+double fly_speed_units_per_second(int speed_level) {
+    static constexpr double kSpeeds[] = {5.0, 15.0, 40.0};
+    return kSpeeds[std::clamp(speed_level, 0, 2)];
+}
+
 void handle_camera_input(GLFWwindow* window, ehe::core::Camera& camera, double& last_x,
-                         double& last_y, bool& dragging) {
+                         double& last_y, bool& dragging, double frame_dt_seconds,
+                         int fly_speed_level) {
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.WantCaptureMouse) {
+        dragging = false;
+        return;  // ImGui 捕获鼠标时不做相机交互（面板拖拽不转视角）
+    }
     double x = 0.0;
     double y = 0.0;
     glfwGetCursorPos(window, &x, &y);
 
-    const bool left_down = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-    if (left_down && !dragging) {
+    const bool orbit_mode = camera.mode() == ehe::core::CameraMode::Orbit;
+    const int orbit_button = GLFW_MOUSE_BUTTON_LEFT;
+    const int fly_button = GLFW_MOUSE_BUTTON_RIGHT;
+    const int drag_button = orbit_mode ? orbit_button : fly_button;
+
+    const bool button_down = glfwGetMouseButton(window, drag_button) == GLFW_PRESS;
+    if (button_down && !dragging) {
         dragging = true;
         last_x = x;
         last_y = y;
-    } else if (!left_down) {
+    } else if (!button_down) {
         dragging = false;
     }
-    if (dragging && left_down) {
-        camera.orbit(-(x - last_x) * 0.3, (y - last_y) * 0.3);
+    if (dragging && button_down) {
+        if (orbit_mode) {
+            camera.orbit(-(x - last_x) * 0.3, (y - last_y) * 0.3);
+        } else {
+            camera.fly_look(-(x - last_x) * 0.15, -(y - last_y) * 0.15);
+        }
         last_x = x;
         last_y = y;
+    }
+
+    // 自由飞行平移（§4.7：WASD + Shift ×5；ImGui 捕获键盘时不响应）
+    if (!orbit_mode && !io.WantCaptureKeyboard && frame_dt_seconds > 0.0) {
+        double speed = fly_speed_units_per_second(fly_speed_level) * frame_dt_seconds;
+        if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+            glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS) {
+            speed *= 5.0;
+        }
+        double fly_forward = 0.0;
+        double fly_strafe = 0.0;
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
+            fly_forward += 1.0;
+        }
+        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
+            fly_forward -= 1.0;
+        }
+        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) {
+            fly_strafe += 1.0;
+        }
+        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) {
+            fly_strafe -= 1.0;
+        }
+        if (fly_forward != 0.0 || fly_strafe != 0.0) {
+            camera.fly_move(ehe::core::Vec3{fly_strafe * speed, 0.0, fly_forward * speed});
+        }
     }
 }
 
@@ -421,100 +478,266 @@ void on_scroll(GLFWwindow* window, double /*xoffset*/, double yoffset) {
     }
 }
 
+void draw_overlay(const Options& options, ehe::render::IRenderer& renderer, int internal_width,
+                  int internal_height, double frame_ms) {
+    const ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 240.0F, 16.0F), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(224, 0), ImGuiCond_FirstUseEver);
+    ImGui::Begin("EHE 监控", nullptr, ImGuiWindowFlags_NoCollapse);
+    int out_width = 0;
+    int out_height = 0;
+    renderer.framebuffer_size(out_width, out_height);
+    ImGui::Text("FPS        %.1f", static_cast<double>(io.Framerate));
+    ImGui::Text("帧时间     %.2f ms", frame_ms);
+    ImGui::Text("分辨率     %dx%d x %dx%d", internal_width, internal_height, out_width, out_height);
+    ImGui::Text("后端       %s", ehe::render::backend_name(options.backend));
+    const double gpu_ms = renderer.gpu_frame_ms();
+    if (gpu_ms >= 0.0) {
+        ImGui::Text("GPU        %.2f ms", gpu_ms);
+    } else {
+        ImGui::TextDisabled("GPU        n/a");
+    }
+    const double steps = renderer.last_avg_steps();
+    if (steps >= 0.0) {
+        ImGui::Text("平均步数   %.1f", steps);
+    } else {
+        ImGui::TextDisabled("平均步数   n/a");
+    }
+    ImGui::End();
+}
+
 void draw_panel(const Options& options, ehe::core::Camera& camera, ehe::render::IRenderer& renderer,
                 ehe::render::SimParams& params, bool& request_switch,
                 ehe::core::Backend& target_backend, ehe::core::Config& config, bool& animation,
-                double animation_time) {
+                double animation_time, UiState& ui, ehe::app::AudioEngine& audio) {
     ImGui::SetNextWindowPos(ImVec2(16, 16), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(400, 420), ImGuiCond_FirstUseEver);
-    ImGui::Begin("EHE 控制面板（T1.3 / T1.4）");
+    ImGui::SetNextWindowSize(ImVec2(420, 640), ImGuiCond_FirstUseEver);
+    ImGui::Begin("EHE 控制面板");
 
     ImGui::Text("版本 %s [%s]", ehe::core::version_string(), ehe::core::build_flags());
     int width = 0;
     int height = 0;
     renderer.framebuffer_size(width, height);
-    ImGui::Text("窗口 %dx%d   帧率 %.1f FPS", width, height,
-                static_cast<double>(ImGui::GetIO().Framerate));
-
+    ImGui::Text("窗口 %dx%d", width, height);
     if (!renderer.pipeline_ready()) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0F, 0.4F, 0.4F, 1.0F));
         ImGui::TextWrapped("管线未就绪：%s", renderer.last_error().c_str());
         ImGui::PopStyleColor();
     }
+    ImGui::Checkbox("显示监控 overlay（§8）", &ui.show_overlay);
 
-    ImGui::Separator();
-    ImGui::TextUnformatted("调试视图（§5.5）");
-    const char* views[] = {"shaded", "steps", "classify", "g_factor", "null_drift"};
-    int current = static_cast<int>(ehe::render::debug_view_of(params));
-    if (ImGui::Combo("##view", &current, views, 5)) {
-        ehe::render::set_debug_view(params, static_cast<ehe::render::DebugView>(current));
+    // ================================================================ 渲染组
+    if (ImGui::CollapsingHeader("渲染", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const char* backend_items[] = {"OpenGL 4.5", "Vulkan 1.2"};
+        int backend_index = renderer.backend() == ehe::core::Backend::Vulkan ? 1 : 0;
+        if (ImGui::Combo("后端", &backend_index, backend_items, 2)) {
+            const auto picked =
+                backend_index == 1 ? ehe::core::Backend::Vulkan : ehe::core::Backend::OpenGL;
+            if (picked != renderer.backend()) {
+                request_switch = true;
+                target_backend = picked;
+            }
+        }
+        const char* mode_items[] = {"raymarch（相对论光线追踪）", "particle（经典粒子，牛顿近似）"};
+        int mode_index = config.render.mode == ehe::core::RenderMode::Particle ? 1 : 0;
+        if (ImGui::Combo("模式", &mode_index, mode_items, 2)) {
+            config.render.mode =
+                mode_index == 1 ? ehe::core::RenderMode::Particle : ehe::core::RenderMode::Raymarch;
+        }
+
+        const char* scale_items[] = {"0.5x", "0.67x", "0.75x", "1.0x（原生）", "1.25x", "1.5x", "2.0x"};
+        const double scale_values[] = {0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0};
+        int scale_index = 3;
+        for (int i = 0; i < 7; ++i) {
+            if (std::abs(config.render.res_scale - scale_values[i]) < 1e-6) {
+                scale_index = i;
+                break;
+            }
+        }
+        if (ImGui::Combo("内部分辨率", &scale_index, scale_items, 7)) {
+            config.render.res_scale = scale_values[scale_index];
+        }
+        ImGui::TextDisabled(">1.0 = SSAA 降采样；<1.0 = 升频（FSR1 开关生效）");
+        ImGui::Checkbox("FSR1 升频（<1.0x 时）", &config.render.fsr1);
+        ImGui::Checkbox("FXAA（色调映射前）", &config.render.fxaa);
+
+        const char* fps_items[] = {"60", "120", "不限"};
+        const int fps_values[] = {60, 120, 0};
+        int fps_index = 0;
+        for (int i = 0; i < 3; ++i) {
+            if (config.render.fps_cap == fps_values[i]) {
+                fps_index = i;
+                break;
+            }
+        }
+        if (ImGui::Combo("帧率上限", &fps_index, fps_items, 3)) {
+            config.render.fps_cap = fps_values[fps_index];
+        }
+
+        const char* views[] = {"shaded", "steps", "classify", "g_factor", "null_drift"};
+        int current = static_cast<int>(ehe::render::debug_view_of(params));
+        if (ImGui::Combo("调试视图", &current, views, 5)) {
+            ehe::render::set_debug_view(params, static_cast<ehe::render::DebugView>(current));
+        }
+        ImGui::TextDisabled("classify / steps 用于自查积分器行为（§5.5）");
     }
-    ImGui::TextDisabled("classify / steps 用于自查积分器行为");
 
-    ImGui::Separator();
-    ImGui::TextUnformatted("盘体湍流（§4.5）");
-    float noise = static_cast<float>(config.blackhole.disk_noise);
-    if (ImGui::SliderFloat("噪声振幅", &noise, 0.0F, 1.0F, "%.2f")) {
-        config.blackhole.disk_noise = static_cast<double>(noise);
+    // ================================================================ 黑洞组
+    if (ImGui::CollapsingHeader("黑洞", ImGuiTreeNodeFlags_DefaultOpen)) {
+        float mass = static_cast<float>(config.blackhole.mass);
+        if (ImGui::SliderFloat("质量 M", &mass, 0.1F, 10.0F, "%.2f")) {
+            config.blackhole.mass = static_cast<double>(mass);
+        }
+        ImGui::TextDisabled("方程在 M=1 下无量纲化；此处仅面板展示");
+
+        // M1 阶段自旋锁定为 0（§8：灰显）
+        ImGui::BeginDisabled(true);
+        float spin = static_cast<float>(config.blackhole.spin);
+        ImGui::SliderFloat("自旋 a", &spin, 0.0F, 0.998F, "%.3f");
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextDisabled("M1 锁定 0（Kerr 随 M2 解锁）");
+
+        float r_in = static_cast<float>(config.blackhole.disk_r_in);
+        if (ImGui::SliderFloat("盘内半径", &r_in, 2.5F, 12.0F, "%.1f")) {
+            config.blackhole.disk_r_in = static_cast<double>(r_in);
+        }
+        float r_out = static_cast<float>(config.blackhole.disk_r_out);
+        if (ImGui::SliderFloat("盘外半径", &r_out, 10.0F, 40.0F, "%.1f")) {
+            config.blackhole.disk_r_out = static_cast<double>(r_out);
+        }
+        float density = static_cast<float>(config.blackhole.disk_density);
+        if (ImGui::SliderFloat("盘密度", &density, 0.0F, 2.0F, "%.2f")) {
+            config.blackhole.disk_density = static_cast<double>(density);
+        }
+        float t_scale = static_cast<float>(config.blackhole.disk_t_scale);
+        if (ImGui::SliderFloat("盘温 T_scale", &t_scale, 2000.0F, 40000.0F, "%.0f K")) {
+            config.blackhole.disk_t_scale = static_cast<double>(t_scale);
+        }
+        float kappa = static_cast<float>(config.blackhole.disk_kappa);
+        if (ImGui::SliderFloat("吸收 κ", &kappa, 0.1F, 8.0F, "%.2f")) {
+            config.blackhole.disk_kappa = static_cast<double>(kappa);
+        }
+        float noise = static_cast<float>(config.blackhole.disk_noise);
+        if (ImGui::SliderFloat("湍流噪声振幅", &noise, 0.0F, 1.0F, "%.2f")) {
+            config.blackhole.disk_noise = static_cast<double>(noise);
+        }
+        ImGui::Checkbox("盘动画（time 推进）", &animation);
+        ImGui::TextDisabled("图案按 Ω(r)=r^-3/2 差速旋转；golden 基线用关闭 + 噪声 0");
+        ImGui::Text("t = %.2f s", animation_time);
     }
-    ImGui::Checkbox("动画（time 随时间推进）", &animation);
-    ImGui::TextDisabled("图案按 Ω(r)=r^-3/2 差速旋转（内快外慢）；0 = 关闭（golden 基线用 0）");
-    ImGui::Text("t = %.2f s", animation_time);
 
-    ImGui::Separator();
-    ImGui::TextUnformatted("后处理（§4.6）");
-    const char* scale_items[] = {"0.5x", "0.67x", "0.75x", "1.0x（原生）", "1.25x", "1.5x", "2.0x"};
-    const double scale_values[] = {0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0};
-    int scale_index = 3;
-    for (int i = 0; i < 7; ++i) {
-        if (std::abs(config.render.res_scale - scale_values[i]) < 1e-6) {
-            scale_index = i;
-            break;
+    // ================================================================ 积分器组
+    if (ImGui::CollapsingHeader("积分器")) {
+        int n_max = config.integrator.n_max;
+        if (ImGui::SliderInt("最大步数 N", &n_max, 30, 2048)) {
+            config.integrator.n_max = n_max;
+        }
+        float h0 = static_cast<float>(config.integrator.h0);
+        if (ImGui::SliderFloat("步长因子 h0", &h0, 0.005F, 0.2F, "%.3f")) {
+            config.integrator.h0 = static_cast<double>(h0);
+        }
+        float h_min = static_cast<float>(config.integrator.h_min);
+        if (ImGui::SliderFloat("步长下限 h_min", &h_min, 0.0001F, 0.01F, "%.4f")) {
+            config.integrator.h_min = static_cast<double>(h_min);
+        }
+        float h_max = static_cast<float>(config.integrator.h_max);
+        if (ImGui::SliderFloat("步长上限 h_max", &h_max, 0.05F, 1.0F, "%.2f")) {
+            config.integrator.h_max = static_cast<double>(h_max);
+        }
+        const char* precision_items[] = {"mixed（关键路径 fp64）", "纯 fp32"};
+        int precision_index =
+            config.integrator.precision == ehe::core::PrecisionMode::Fp32 ? 1 : 0;
+        if (ImGui::Combo("精度模式", &precision_index, precision_items, 2)) {
+            config.integrator.precision =
+                precision_index == 1 ? ehe::core::PrecisionMode::Fp32
+                                     : ehe::core::PrecisionMode::Mixed;
+            ui.rebuild_requested = true;  // shader 宏变化 → 重建管线（不重建上下文）
         }
     }
-    if (ImGui::Combo("内部分辨率", &scale_index, scale_items, 7)) {
-        config.render.res_scale = scale_values[scale_index];
-    }
-    ImGui::TextDisabled(">1.0 = SSAA 降采样；<1.0 = 升频（FSR1 见 T1.5.2，当前 Catmull-Rom）");
-    ImGui::Checkbox("FXAA（色调映射前）", &config.render.fxaa);
-    ImGui::SameLine();
-    ImGui::Checkbox("ACES", &config.post.aces);
-    float exposure = static_cast<float>(config.post.exposure);
-    if (ImGui::SliderFloat("曝光", &exposure, 0.05F, 4.0F, "%.2f")) {
-        config.post.exposure = static_cast<double>(exposure);
-    }
-    float chroma_ab = static_cast<float>(config.post.chrom_ab);
-    if (ImGui::SliderFloat("色差", &chroma_ab, 0.0F, 1.0F, "%.2f")) {
-        config.post.chrom_ab = static_cast<double>(chroma_ab);
+
+    // ================================================================ 粒子组
+    if (ImGui::CollapsingHeader("粒子")) {
+        ImGui::Checkbox("启用粒子", &config.particle.enabled);
+        // 数量：1k–1M 对数档（§5.6）
+        float count_log = std::log10(static_cast<double>(std::max(1000, config.particle.count)));
+        if (ImGui::SliderFloat("数量（对数）", &count_log, 3.0F, 6.0F, "10^%.1f")) {
+            const double raw = std::pow(10.0, static_cast<double>(count_log));
+            config.particle.count = std::max(1000, static_cast<int>(raw / 1000.0 + 0.5) * 1000);
+        }
+        ImGui::TextDisabled("当前 %d 粒子", config.particle.count);
+        float size = static_cast<float>(config.particle.size);
+        if (ImGui::SliderFloat("大小", &size, 0.2F, 4.0F, "%.2f")) {
+            config.particle.size = static_cast<double>(size);
+        }
+        const char* profile_items[] = {"kepler（开普勒圆速 ±5%）"};
+        int profile_index = 0;
+        ImGui::Combo("初速分布", &profile_index, profile_items, 1);
+
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0F, 0.75F, 0.2F, 1.0F));
+        ImGui::TextWrapped("⚠ 粒子为牛顿近似，与 GR 模式不具物理一致性（§5.6 科普演示定位）");
+        ImGui::PopStyleColor();
     }
 
-    ImGui::Separator();
-    ImGui::TextUnformatted("相机（§4.7）");
-    double fov = camera.fov_deg();
-    float fov_lo = static_cast<float>(ehe::core::kFovMinDeg);
-    float fov_hi = static_cast<float>(ehe::core::kFovMaxDeg);
-    if (ImGui::SliderScalar("FOV", ImGuiDataType_Double, &fov, &fov_lo, &fov_hi, "%.1f deg")) {
-        camera.set_fov_deg(fov);
-    }
-    ImGui::Text("距离 %.2f  方位 %.1f°  极角 %.1f°", camera.orbit_distance(),
-                camera.orbit_azimuth_deg(), camera.orbit_polar_deg());
-    ImGui::TextDisabled("左键拖拽旋转 / 滚轮缩放（自由飞行见 T1.7）");
-
-    ImGui::Separator();
-    const char* items[] = {"OpenGL 4.5", "Vulkan 1.2"};
-    int backend_index = renderer.backend() == ehe::core::Backend::Vulkan ? 1 : 0;
-    ImGui::TextUnformatted("渲染后端");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(170);
-    if (ImGui::Combo("##backend", &backend_index, items, 2)) {
-        const auto picked =
-            backend_index == 1 ? ehe::core::Backend::Vulkan : ehe::core::Backend::OpenGL;
-        if (picked != renderer.backend()) {
-            request_switch = true;
-            target_backend = picked;
+    // ================================================================ 后处理组
+    if (ImGui::CollapsingHeader("后处理", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox("ACES 色调映射", &config.post.aces);
+        float exposure = static_cast<float>(config.post.exposure);
+        if (ImGui::SliderFloat("曝光", &exposure, 0.05F, 4.0F, "%.2f")) {
+            config.post.exposure = static_cast<double>(exposure);
+        }
+        float chroma_ab = static_cast<float>(config.post.chrom_ab);
+        if (ImGui::SliderFloat("色差", &chroma_ab, 0.0F, 1.0F, "%.2f")) {
+            config.post.chrom_ab = static_cast<double>(chroma_ab);
         }
     }
-    // 精度策略等能力信息经 --caps 查看；管线未就绪时上方红字会显示 last_error
+
+    // ================================================================ 音频组
+    if (ImGui::CollapsingHeader("音频")) {
+        float volume = static_cast<float>(config.audio.volume);
+        if (ImGui::SliderFloat("音量", &volume, 0.0F, 1.0F, "%.2f")) {
+            config.audio.volume = static_cast<double>(volume);
+            audio.set_volume(volume);
+        }
+        ImGui::Checkbox("静音", &config.audio.muted);
+        audio.set_muted(config.audio.muted);
+        if (!audio.ready()) {
+            ImGui::TextDisabled("音频设备不可用（静默降级）");
+        }
+        ImGui::TextDisabled("合成：棕噪声 + 低通，音色随盘密度变化（§5.7）");
+    }
+
+    // ================================================================ 相机组
+    if (ImGui::CollapsingHeader("相机", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const char* camera_items[] = {"轨道（绕黑洞）", "自由飞行（WASD + 右键转视角）"};
+        int camera_index = camera.mode() == ehe::core::CameraMode::Fly ? 1 : 0;
+        if (ImGui::Combo("相机模式", &camera_index, camera_items, 2)) {
+            camera.set_mode(camera_index == 1 ? ehe::core::CameraMode::Fly
+                                              : ehe::core::CameraMode::Orbit);
+        }
+        double fov = camera.fov_deg();
+        float fov_lo = static_cast<float>(ehe::core::kFovMinDeg);
+        float fov_hi = static_cast<float>(ehe::core::kFovMaxDeg);
+        if (ImGui::SliderScalar("FOV", ImGuiDataType_Double, &fov, &fov_lo, &fov_hi, "%.1f deg")) {
+            camera.set_fov_deg(fov);
+        }
+        if (camera.mode() == ehe::core::CameraMode::Orbit) {
+            float dist = static_cast<float>(camera.orbit_distance());
+            if (ImGui::SliderFloat("距离", &dist, static_cast<float>(ehe::core::kOrbitDistanceMin),
+                                   static_cast<float>(ehe::core::kOrbitDistanceMax), "%.1f")) {
+                camera.zoom(std::log2(dist / camera.orbit_distance()));  // 对数缩放语义
+            }
+            ImGui::Text("方位 %.1f°  极角 %.1f°", camera.orbit_azimuth_deg(),
+                        camera.orbit_polar_deg());
+            ImGui::TextDisabled("左键拖拽旋转 / 滚轮缩放");
+        } else {
+            const char* speed_items[] = {"慢（5/s）", "中（15/s）", "快（40/s）"};
+            ImGui::Combo("飞行速度", &ui.fly_speed, speed_items, 3);
+            ImGui::TextDisabled("WASD 平移 · Shift 加速 x5 · 右键拖拽转视角");
+        }
+    }
+
+    ImGui::Separator();
     ImGui::TextDisabled("初始后端 %s / vsync=%d / 配置 %s", ehe::render::backend_name(options.backend),
                         options.vsync ? 1 : 0, options.config_path.c_str());
     ImGui::End();
@@ -522,7 +745,15 @@ void draw_panel(const Options& options, ehe::core::Camera& camera, ehe::render::
 
 int run_window(const Options& options) {
     std::vector<std::string> warnings;
-    ehe::core::Config config = ehe::core::Config::load_from_file(options.config_path, &warnings);
+    // §8.1 启动加载顺序：显式 --config > ehe.config.json（上次会话）> 默认路径。
+    // 显式 --config 也照常加载（golden 校验/参数文件场景），退出时仍保存会话状态。
+    std::string load_path = options.config_path;
+    if (std::ifstream(options.persist_path)) {
+        load_path = options.persist_path;  // 上次会话状态优先于默认参数文件
+        std::printf("[main] 发现会话配置 %s（优先于 %s 加载）\n", options.persist_path.c_str(),
+                    options.config_path.c_str());
+    }
+    ehe::core::Config config = ehe::core::Config::load_from_file(load_path, &warnings);
     if (!options.precision.empty()) {
         config.integrator.precision = (options.precision == "fp32")
                                           ? ehe::core::PrecisionMode::Fp32
@@ -533,6 +764,14 @@ int run_window(const Options& options) {
         std::fprintf(stderr, "[main][config] %s\n", warning.c_str());
     }
     config.render.backend = options.backend;
+
+    /// 保存会话状态（§8.1：退出/切换后端时保存；相机状态经 write_to 回写）
+    const auto persist_config = [&config, &options](const ehe::core::Camera& camera) {
+        camera.write_to(config.camera);
+        if (!config.save_to_file(options.persist_path)) {
+            std::fprintf(stderr, "[main] 会话配置保存失败：%s\n", options.persist_path.c_str());
+        }
+    };
 
     ehe::render::Backend current_backend = options.backend;
     ehe::render::RendererConfig cfg{};
@@ -566,6 +805,13 @@ int run_window(const Options& options) {
     bool dragging = false;
     double zoom_accumulator = 0.0;
 
+    ehe::app::AudioEngine audio;  // 音频独立线程（§5.7）；初始化失败静默降级
+    audio.init();
+    audio.set_volume(config.audio.volume);
+    audio.set_muted(config.audio.muted);
+
+    UiState ui;
+
     auto bind_window = [&]() {
         GLFWwindow* current = glfwGetCurrentContext();
         if (current != nullptr) {
@@ -586,7 +832,8 @@ int run_window(const Options& options) {
     while (running && !renderer->should_close()) {
         glfwPollEvents();
         if (window != nullptr) {
-            handle_camera_input(window, camera, last_x, last_y, dragging);
+            handle_camera_input(window, camera, last_x, last_y, dragging, last_frame_ms * 0.001,
+                                ui.fly_speed);
             if (zoom_accumulator != 0.0) {
                 camera.zoom(zoom_accumulator);
                 zoom_accumulator = 0.0;
@@ -603,12 +850,21 @@ int run_window(const Options& options) {
             options.time + (animation ? (glfwGetTime() - animation_start) : 0.0);
         ehe::render::SimParams params =
             ehe::render::make_sim_params(config, camera, camera.forward(), aspect, animation_time);
+        // 动画/粒子步进开关（app 层运行时状态，不进 schema）
+        ehe::render::set_flag(params, ehe::render::kFlagAnimate, animation);
 
         bool request_switch = false;
         ehe::core::Backend target_backend = current_backend;
         draw_panel(options, camera, *renderer, params, request_switch, target_backend, config,
-                   animation, animation_time);
+                   animation, animation_time, ui, audio);
         renderer->set_params(params);  // 面板改动当帧生效
+
+        int internal_width = 0;
+        int internal_height = 0;
+        renderer->render_resolution(internal_width, internal_height);
+        if (ui.show_overlay) {
+            draw_overlay(options, *renderer, internal_width, internal_height, last_frame_ms);
+        }
 
         renderer->end_frame();
 
@@ -622,8 +878,33 @@ int run_window(const Options& options) {
                              last_frame_ms, renderer->pipeline_ready() ? 1 : 0);
             }
         }
+
+        // 帧率上限（§8 渲染组）：vsync 之外再做软限速（cap > 实际帧率时 sleep 不触发）
+        if (config.render.fps_cap > 0 && last_frame_ms > 0.0) {
+            const double budget_ms = 1000.0 / static_cast<double>(config.render.fps_cap);
+            if (last_frame_ms < budget_ms - 0.5) {
+                std::this_thread::sleep_for(
+                    std::chrono::duration<double, std::milli>(budget_ms - last_frame_ms - 0.5));
+            }
+        }
+
         if (options.window_frames > 0 && rendered >= options.window_frames) {
             running = false;
+        }
+
+        // 精度模式改动 → 重建管线（不重建上下文；GL/VK 同路径，见 IRenderer::rebuild_pipeline）
+        if (ui.rebuild_requested) {
+            ui.rebuild_requested = false;
+            std::vector<std::string> defines;
+            if (config.integrator.precision == ehe::core::PrecisionMode::Fp32) {
+                defines.push_back("EHE_FP32_ONLY");
+            }
+            std::printf("[main] 精度切换 → 重建管线（%s）\n",
+                        config.integrator.precision == ehe::core::PrecisionMode::Fp32 ? "fp32"
+                                                                                      : "mixed");
+            if (!renderer->rebuild_pipeline(defines)) {
+                std::fprintf(stderr, "[main] 管线重建失败：%s\n", renderer->last_error().c_str());
+            }
         }
 
         if (request_switch) {
@@ -633,6 +914,7 @@ int run_window(const Options& options) {
             int last_width = 0;
             int last_height = 0;
             renderer->framebuffer_size(last_width, last_height);
+            persist_config(camera);  // §8.1：切换后端时保存
 
             renderer->shutdown();
             renderer.reset();
@@ -658,6 +940,7 @@ int run_window(const Options& options) {
                 renderer = ehe::app::create_renderer(current_backend);
                 if (renderer == nullptr || !renderer->init(cfg)) {
                     std::fprintf(stderr, "[main] 回退到初始后端仍失败，程序退出\n");
+                    audio.shutdown();
                     return 1;
                 }
             }
@@ -668,6 +951,8 @@ int run_window(const Options& options) {
         }
     }
 
+    persist_config(camera);  // §8.1：退出时保存会话状态
+    audio.shutdown();
     renderer->shutdown();
     renderer.reset();
     return 0;

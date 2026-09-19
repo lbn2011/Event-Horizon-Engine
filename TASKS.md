@@ -1,4 +1,4 @@
-# EHE 任务拆解 V1.21
+# EHE 任务拆解 V1.22
 
 > 执行清单，与 `DESIGN.md`（规格权威）配套使用。冲突时以 DESIGN.md 为准。
 > 每条任务：可勾选状态、验收标准、依赖、产出物。完成后勾 `[x]` 并注明日期。
@@ -12,6 +12,8 @@
 > → V1.19（T1.6.4 五轮：解耦真机验证通过（输出 32×32 ✓）；交换链 usage 补 TRANSFER_DST）。
 > → V1.20（T1.6.4 六轮：VK 读回/呈现行序翻转——NMSE=1.83 真正根因）。
 > → V1.21（T1.6.4 六轮真机验证通过：VK smoke NMSE=1.625183e-04 与 GL 同量级 → T1.6 收官关单）。
+> → V1.22（T1.7 UI 完整化 + T1.8 粒子/音频实施：面板 7 组/overlay/fly 相机/Config 持久化/
+>   粒子双后端/miniaudio 棕噪声；开发机验证，待目标机复跑）。
 
 图例：🏁 = 里程碑验收门；⛓ = 有前置依赖；产出物用 `代码格式` 标注。
 
@@ -312,16 +314,35 @@
         插曲：#49 首包漏 shaders/common/*.glsl 与 blackbody_lut.f32（手动组包未照抄 ci.yml
         的 `Copy-Item -Recurse shaders`），用户手动补文件后复跑通过；包已重组重传
 
-### T1.7 UI 完整化 ⛓T1.3
-- [ ] T1.7.1 面板 7 组全参数（§8 表逐项）+ 自旋 a 灰显锁定
-- [ ] T1.7.2 监控 overlay（左上角独立）：FPS/帧时间/分辨率/后端/GPU 计时/平均步数
-- [ ] T1.7.3 自由飞行相机（§4.7）+ 双模式切换
-- [ ] T1.7.4 Config 持久化（启动加载、退出/切后端保存）
+### T1.7 UI 完整化 ⛓T1.3 —— ✅ 2026-09-20（开发机验证，待目标机复跑）
+- [x] T1.7.1 面板 7 组全参数（§8 表逐项）+ 自旋 a 灰显锁定
+  `main.cpp draw_panel`：渲染/黑洞/积分器/粒子/后处理/音频/相机 7 组 CollapsingHeader；
+  a 用 `ImGui::BeginDisabled` 灰显（M1 纯 Schwarzschild）；精度 Combo → `rebuild_pipeline`
+- [x] T1.7.2 监控 overlay（右上角独立窗口）：FPS/帧时间/内部×输出分辨率/后端/GPU 计时/平均步数
+  GL = GL_TIME_ELAPSED 双缓冲 + mipmap 归约读 1×1 alpha；VK = timestamp query（per slot
+  帧首/尾对）+ 逐级 blit 归约；IRenderer 新增 render_resolution/gpu_frame_ms/last_avg_steps
+  （默认 -1，后端不支持显示 n/a）；主面板 checkbox 开关，不进 schema
+- [x] T1.7.3 自由飞行相机（§4.7）+ 双模式切换
+  fly = 右键拖拽 fly_look + WASD fly_move（Shift×5）；orbit = 左键拖拽 + 滚轮缩放；
+  io.WantCaptureMouse/Keyboard 时不响应；速度三档 5/15/40 单位每秒
+- [x] T1.7.4 Config 持久化（启动加载、退出/切后端保存）
+  加载顺序 = --config > ehe.config.json（存在优先）> 默认 golden 参数；
+  退出/切后端前 `camera.write_to(config.camera)` + `config.save_to_file`
 
-### T1.8 粒子 + 音频 ⛓T1.1（与渲染解耦，可并行）
-- [ ] T1.8.1 粒子 compute（初始化/leapfrog/回收，§5.6）+ 点精灵加色混合
-- [ ] T1.8.2 UI 明示"牛顿近似"标注
-- [ ] T1.8.3 miniaudio 接入 + 棕噪声低通合成（§5.7 参数映射）
+### T1.8 粒子 + 音频 ⛓T1.1（与渲染解耦，可并行）—— ✅ 2026-09-20（开发机验证，待目标机复跑）
+- [x] T1.8.1 粒子 compute（初始化/leapfrog/回收，§5.6）+ 点精灵加色混合
+  core/particles.cpp 环带均匀+高斯厚度 σ=0.5M+开普勒 ±5%（种子 20260920 可复现）；
+  particle_update.comp leapfrog KDK（dt=0.05、盘平面弹簧 0.02z、r<2M/r>50M hash 重生）；
+  particle_draw.vert/frag 点精灵 vertex pulling（点径 clamp[1,24]、温度=盘通量剖面、
+  LUT 上色）+ GL_ONE/GL_ONE 加色在色调映射前进 HDR；双后端（GL SSBO+dispatch / VK
+  SSBO 双缓冲+独立 descriptor set+point pass loadOp=LOAD）；flags.w=particle_size、
+  kFlagParticleEnabled/kFlagAnimate、raymarch.frag alpha=step_used（V5.18）
+- [x] T1.8.2 UI 明示"牛顿近似"标注
+  粒子面板组黄色警示"⚠ 粒子为牛顿近似，与 GR 模式不具物理一致性"
+- [x] T1.8.3 miniaudio 接入 + 棕噪声低通合成（§5.7 参数映射）
+  app/audio.{h,cpp}：48kHz 单声道 data callback（音频线程独立、参数全 atomic）；
+  棕噪声 x←0.998x+0.02w（LCG 白噪声）→ 单极点低通（截止=40+200·norm(盘密度)、
+  增益∝√norm）；初始化失败静默降级；音量/静音/密度归一三个接口挂主循环
 
 ### T1.9 冒烟与发布 ⛓T1.6, T1.7, T1.8
 - [ ] T1.9.1 `--smoke` 模式（§6.3 CLI、退出码、PFM+PNG 输出）

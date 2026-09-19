@@ -1,0 +1,107 @@
+// EHE —— 粒子积分 compute shader（GLSL 450，DESIGN §5.6 粒子模式）
+//
+// 每帧一步 leapfrog KDK（辛、二阶）：
+//   v½ = v + a(x)·dt/2 → x' = x + v½·dt → v' = v½ + a(x')·dt/2
+//
+// 力模型（**牛顿近似**——科普演示定位，UI 必须明示与 GR 模式不具物理一致性，§5.6）：
+//   a = −M/r²·r̂（中心引力）+ 盘平面弱恢复力（z 方向弹簧，防离散逃逸【建议默认】）
+//
+// 回收重生：r < 2M（视界）或 r > 50M → 按初始分布规则重生（环带均匀 + 高斯厚度 +
+//   开普勒方位速度）；RNG = seed + time + gid 的 hash（与 core/particles.cpp 独立）。
+
+#version 450
+
+#include "common/simparams.glsl"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// 粒子 SSBO（§5.4.1：双后端共享 binding 2；布局与 core/particles.cpp 逐字段对齐）
+struct Particle {
+    vec4 pos_seed;  // xyz = 位置, w = 个体种子（重生 RNG 基）
+    vec4 vel_pad;   // xyz = 速度, w = 保留
+};
+layout(std430, binding = 2) buffer ParticleBuffer {
+    Particle particles[];
+};
+
+const float EHE_PARTICLE_DT = 0.05;      // 每帧一步的固定 dt（确定性优先，不随帧率变）
+const float EHE_DISK_SPRING = 0.02;      // 盘平面弱恢复力系数（§5.6 建议默认）
+const float EHE_RESPAWN_INNER = 2.0;     // r < 2M 回收（视界，牛顿近似下 a=0 的 r_s=2M）
+const float EHE_RESPAWN_OUTER = 50.0;    // r > 50M 回收
+
+float hash01(uint x) {
+    x = (x ^ 61u) ^ (x >> 16u);
+    x = x * 9u;
+    x = x ^ (x >> 4u);
+    x = x * 0x27d4eb2du;
+    x = x ^ (x >> 15u);
+    return float(x) * (1.0 / 4294967296.0);
+}
+
+vec3 acceleration(vec3 position, float mass) {
+    const float r2 = dot(position, position);
+    const float r = sqrt(max(r2, 1e-6));
+    // 中心引力 −M/r²·r̂；软化项防 r→0 爆炸（回收逻辑兜底，软化只为数值温和）
+    const vec3 gravity = -position * (mass / max(r2 * r, 1e-4));
+    // 盘平面弱恢复力（z 方向弹簧，§5.6 建议默认）
+    return gravity + vec3(0.0, 0.0, -EHE_DISK_SPRING * position.z);
+}
+
+/// 按初始分布规则重生一个粒子（§5.6：环带均匀 + 高斯厚度 σ=0.5M + 开普勒 ±5%）
+void respawn(inout Particle particle, uint gid, float time_value, float mass) {
+    const uint basis = uint(particle.pos_seed.w) + gid * 747796405u + uint(time_value * 1000.0);
+    const float u1 = hash01(basis);
+    const float u2 = hash01(basis + 1u);
+    const float u3 = hash01(basis + 2u);
+    const float u4 = hash01(basis + 3u);
+    const float u5 = hash01(basis + 4u);
+
+    const float r = mix(hole.y, hole.z, u1);            // [r_in, r_out] 均匀
+    const float phi = 6.28318530718 * u2;
+    // Box–Muller 高斯（σ=0.5M）
+    const float gauss = sqrt(max(-2.0 * log(max(u3, 1e-6)), 0.0)) * cos(6.28318530718 * u4);
+    const float z = 0.5 * gauss;
+
+    const float speed = sqrt(mass / max(r, 1e-4)) * mix(0.95, 1.05, u5);
+
+    particle.pos_seed.xyz = vec3(r * cos(phi), r * sin(phi), z);
+    particle.vel_pad.xyz = vec3(-speed * sin(phi), speed * cos(phi), 0.0);
+}
+
+void main() {
+    const uint count = uint(flags.z);  // 位打包的 float(int) 直接按整数读也成立（值域为正整数）
+    const uint gid = gl_GlobalInvocationID.x;
+    if (gid >= count) {
+        return;
+    }
+
+    const float mass = 1.0;  // 几何化单位（§4.1：方程在 M=1 下无量纲化）
+    const float time_value = frame.y;
+
+    Particle particle = particles[gid];
+    const float r_current = length(particle.pos_seed.xyz);
+    if (r_current < EHE_RESPAWN_INNER || r_current > EHE_RESPAWN_OUTER) {
+        respawn(particle, gid, time_value, mass);
+        particles[gid] = particle;
+        return;
+    }
+
+    // ---- leapfrog KDK（kick-drift-kick）----
+    const vec3 position = particle.pos_seed.xyz;
+    vec3 velocity = particle.vel_pad.xyz;
+
+    velocity += acceleration(position, mass) * (0.5 * EHE_PARTICLE_DT);
+    const vec3 new_position = position + velocity * EHE_PARTICLE_DT;
+    velocity += acceleration(new_position, mass) * (0.5 * EHE_PARTICLE_DT);
+
+    particle.pos_seed.xyz = new_position;
+    particle.vel_pad.xyz = velocity;
+
+    // 半步内跨入视界/飞出的情况：本步末回收（下一帧重生）
+    const float r_new = length(new_position);
+    if (r_new < EHE_RESPAWN_INNER || r_new > EHE_RESPAWN_OUTER) {
+        respawn(particle, gid, time_value, mass);
+    }
+
+    particles[gid] = particle;
+}

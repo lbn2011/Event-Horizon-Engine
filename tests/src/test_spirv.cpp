@@ -72,6 +72,42 @@ TEST_CASE("spirv: 全部 shader 在 mixed(fp64) 与 fp32 两种精度下都能�
     }
 }
 
+TEST_CASE("spirv: 粒子三件套（compute + point vert/frag）编出合法 SPIR-V（T1.8.1）") {
+    const std::string root = find_shader_root();
+    REQUIRE_FALSE(root.empty());
+    const std::vector<std::string> roots = {root, "shaders"};
+
+    struct ParticleEntry {
+        const char* file;
+        ehe::render::ShaderStage stage;
+    };
+    const ParticleEntry kParticleShaders[] = {
+        {"particle_update.comp", ehe::render::ShaderStage::Compute},
+        {"particle_draw.vert", ehe::render::ShaderStage::Vertex},
+        {"particle_draw.frag", ehe::render::ShaderStage::Fragment},
+    };
+
+    for (const ParticleEntry& entry : kParticleShaders) {
+        for (const bool fp32_only : {false, true}) {
+            std::vector<std::string> defines = {"EHE_VULKAN"};
+            if (fp32_only) {
+                defines.push_back("EHE_FP32_ONLY");
+            }
+            const ehe::render::SpirvResult result = ehe::render::compile_shader_file_stage(
+                root + "/" + entry.file, roots, entry.stage, defines);
+            INFO("shader=" << entry.file << " fp32=" << fp32_only);
+            if (!result.ok) {
+                std::fprintf(stderr, "[spirv-test] %s（fp32=%d）编译失败：\n%s\n", entry.file,
+                             fp32_only ? 1 : 0, result.log.c_str());
+            }
+            CHECK(result.ok);
+            REQUIRE_FALSE(result.words.empty());
+            CHECK(result.words[0] == kSpirvMagic);
+            CHECK(result.words.size() > 5);
+        }
+    }
+}
+
 TEST_CASE("spirv: 非法源码必须失败且不产生字流（负例）") {
     // 语法错误
     const ehe::render::SpirvResult broken =
