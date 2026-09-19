@@ -706,7 +706,15 @@ private:
         info.imageColorSpace = chosen_format.colorSpace;
         info.imageExtent = extent;
         info.imageArrayLayers = 1;
+        // usage：COLOR_ATTACHMENT（render pass 必需）+ TRANSFER_DST（record_present 的 blit 目标，
+        // VUID-vkCmdBlitImage-dstImage-00224，真机验证层抓出：#47 漏改此处，blit 写 COLOR_ATTACHMENT-only
+        // 的交换链行为未定义 → smoke NMSE=1.83）。TRANSFER_DST 非规范保证项，先查 surface 能力。
         info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        if ((caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0U) {
+            info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        } else {
+            std::fprintf(stderr, "[vk] 警告：交换链不支持 TRANSFER_DST 用途，blit 呈现将不可用\n");
+        }
         info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         info.preTransform = caps.currentTransform;
         info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
