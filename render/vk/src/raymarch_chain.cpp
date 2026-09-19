@@ -145,7 +145,10 @@ struct RaymarchChain::Impl {
         create.tiling = VK_IMAGE_TILING_OPTIMAL;
         create.usage = usage;
         create.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        create.initialLayout = VK_IMAGE_LAYOUT_GENERAL;  // 首版：GENERAL 免过渡
+        // 规范要求 initialLayout ∈ {UNDEFINED, PREINITIALIZED, ZERO_INITIALIZED}
+        //（VUID-VkImageCreateInfo-initialLayout-00993，真机验证层抓出）；
+        // 统一在 LUT 上传提交里做 UNDEFINED → GENERAL 过渡，之后的约定仍是 GENERAL 免过渡
+        create.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         if (vkCreateImage(info.device, &create, nullptr, &image) != VK_SUCCESS) {
             return false;
         }
@@ -533,6 +536,23 @@ bool RaymarchChain::init(const ChainInitInfo& info) {
         std::string upload_err;
         const bool uploaded = impl_->submit_one_shot(
             [&](VkCommandBuffer cmd) {
+                // 首次使用前过渡：4 张图（HDR×3 + LUT）从 UNDEFINED → GENERAL。
+                // 之后离屏链沿用"GENERAL 免过渡"约定，只需 pass 间写后读屏障。
+                VkImage images[4] = {impl_->internal_image, impl_->out_images[0],
+                                     impl_->out_images[1], impl_->lut_image};
+                VkImageMemoryBarrier barriers[4] = {};
+                for (int i = 0; i < 4; ++i) {
+                    barriers[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                    barriers[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                    barriers[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                    barriers[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    barriers[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    barriers[i].image = images[i];
+                    barriers[i].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                }
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                     VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+                                     nullptr, 4, barriers);
                 VkBufferImageCopy region{};
                 region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
                 region.imageExtent = {static_cast<std::uint32_t>(count), 1, 1};
