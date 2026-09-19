@@ -1,4 +1,4 @@
-# EHE 任务拆解 V1.14
+# EHE 任务拆解 V1.15
 
 > 执行清单，与 `DESIGN.md`（规格权威）配套使用。冲突时以 DESIGN.md 为准。
 > 每条任务：可勾选状态、验收标准、依赖、产出物。完成后勾 `[x]` 并注明日期。
@@ -225,14 +225,16 @@
       - **新增 post 一致性对照**：GPU 后处理成品 vs CPU 参考，三条分辨率路径实测 最大差 1/255
       - capture_hdr 语义修正：PFM = "分辨率变换后、色调映射前"的输出分辨率 HDR（res_scale=1 时逐位不变）
 
-### T1.6 Vulkan 后端对齐 ⛓T1.4, T1.5 —— 进行中（T1.6.2 已完成）
+### T1.6 Vulkan 后端对齐 ⛓T1.4, T1.5 —— 进行中（T1.6.1 代码完成，待目标机验证；T1.6.2 已完成）
 - [~] T1.6.1 VK 侧管线/描述符/同步（§5.4.1 对照表逐项）—— 进行中
       - [x] **设备特性与精度策略**：init 时查询 `shaderFloat64` → 支持则显式启用（不启用会让 fp64 流水线创建失败），
             不支持则规整宏为 `EHE_FP32_ONLY`；`effective_shader_defines()` 恒注入 `EHE_VULKAN`（抹平顶点内建名差异）。
             `--caps` 已能报出该设备实际的 VK 精度策略
-      - [ ] shader 模块 + descriptor set layout（binding 0/1/2/3/4 与 GL 对齐）+ 4 条 graphics pipeline
-      - [ ] 离屏目标（HDR 内部 / HDR 输出 ×2 / LDR）+ image layout 屏障 + 4 pass 绘制链
-      - [ ] readback（capture_hdr / capture_ldr）+ pipeline_ready / rebuild_pipeline 落地
+      - [x] shader 模块（SPIR-V ×5）+ descriptor set layout（binding 0/1/2/3/4 与 GL 对齐）+ 4 条 graphics pipeline
+      - [x] 离屏目标（HDR 内部 / HDR 输出 ×2 + 交换链承载 LDR）+ GENERAL 布局与 pass 间内存屏障 + 4 pass 绘制链
+      - [x] readback（capture_hdr / capture_ldr）+ pipeline_ready / rebuild_pipeline 落地
+            （half→float 转换；LDR 从最近一帧交换链图像回读；尺寸/精度档变化时整链重建）
+      - [ ] ⏳ **目标机运行验证**（开发机无 Vulkan ICD）：`ehe --smoke --backend=vk` 与 GL 对比 NMSE/成品图
       - 备注：开发机无 Vulkan ICD（`vulkan-1.dll` 缺失）→ 按 DESIGN §2.1 约定，本机只做编译期验证，
         运行验证在目标机（Iris Xe，Vulkan 1.4.323 已实测可用）
 - [x] T1.6.2 glslang 库接入：启动时 GLSL→SPIR-V（含 include 展开后源码）

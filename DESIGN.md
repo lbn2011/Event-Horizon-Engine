@@ -1,4 +1,4 @@
-# Event Horizon Engine (EHE) — 开发文档 V5.10
+# Event Horizon Engine (EHE) — 开发文档 V5.11
 
 > **本文档是 EHE 项目开发的唯一权威依据。** 原始需求对话（`黑洞渲染模拟：Kerr度规光线....json`）仅为历史参考，
 > 凡本文档与对话冲突之处，以本文档为准。本文档不含代码；修改本文档需明确提出并递增版本号。
@@ -78,6 +78,17 @@
 >   ③ **VK 侧精度必须运行时判定**：`shaderFloat64=0` 的设备（如 Intel 核显）**无法创建 fp64 流水线**，
 >      VK 后端需在 init 时查询该特性并在不支持时强制 `EHE_FP32_ONLY`（T1.6.1 实现要点）。
 >   另：`glslang` 的 SPIRV 目录与 `glslang` 目录**同级**（`<SPIRV/GlslangToSpv.h>`，不是 `<glslang/SPIRV/...>`）。
+> V5.11（2026-09-19）：**T1.6.1 Vulkan 渲染链落地**（`render/vk/src/raymarch_chain.cpp`），4 处实现取舍：
+>   ① **离屏图像统一用 `VK_IMAGE_LAYOUT_GENERAL`**：该布局同时合法于"颜色附件"与"采样源"，**无需布局过渡**，
+>      只需在 pass 之间插 `COLOR_ATTACHMENT_OUTPUT → FRAGMENT_SHADER` 的内存屏障。专用布局更省带宽，
+>      但过渡时机易错——首版刻意避开（正确性优先；优化放到实测之后）。
+>   ② **final pass 直接画进交换链**（复用后端已有 render pass），因此**不需要额外的 blit pass**；
+>      ImGui 随后在同一 render pass 内叠加，与 T0.4 行为一致。
+>   ③ **读回**：图像→缓冲拷贝（GENERAL 布局对 `vkCmdCopyImageToBuffer` 合法）→ CPU 侧 half→float 转换
+>      （HDR 为 RGBA16F）；LDR 从**最近一帧的交换链图像**回读（final 就画在那里）并做 BGRA→RGB。
+>      **Vulkan 图像原点在左上，与 core 的"第 0 行 = 顶部"约定一致，故无需翻转**（GL 侧需要翻转）。
+>   ④ **链重建触发条件**：交换链尺寸变化 或 `res_scale` 档位变化 → 离屏目标尺寸随之变化，必须在帧开始前重建整条链。
+>   另：`ehe_render` 也需链接 `glslang::glslang-default-resource-limits`（`GetDefaultResources()` 不在主库内）。
 
 ---
 
