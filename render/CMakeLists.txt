@@ -20,6 +20,8 @@ target_link_libraries(ehe_render
   PUBLIC ehe_core
   # GLSL → SPIR-V（VK 侧运行时编译，§5.2）；头文件不暴露 glslang 类型，故 PRIVATE
   PRIVATE glslang::glslang
+  # GetDefaultResources() 在独立目标里（不在 glslang 主库内）——tests 侧同样链接它
+  PRIVATE glslang::glslang-default-resource-limits
   PRIVATE ehe_warnings
   PRIVATE ehe_options
 )

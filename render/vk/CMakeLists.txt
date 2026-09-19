@@ -7,6 +7,7 @@
 
 add_library(ehe_render_vk STATIC
   src/vk_backend.cpp
+  src/raymarch_chain.cpp
 )
 
 target_include_directories(ehe_render_vk PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")

@@ -27,6 +27,7 @@
 #include <imgui_impl_vulkan.h>
 
 #include "ehe/render/backend.h"
+#include "ehe/render/vk/raymarch_chain.h"
 
 namespace ehe::render::vk {
 namespace {
@@ -89,6 +90,8 @@ public:
     }
 
     void shutdown() override {
+        // 链依赖 device 与 render pass，须在两者之前销毁
+        chain_.destroy();
         if (device_ != VK_NULL_HANDLE) {
             vkDeviceWaitIdle(device_);
         }
@@ -131,6 +134,18 @@ public:
     }
 
     void begin_frame() override {
+        // 交换链尺寸或 res_scale 变化 → 离屏目标尺寸随之变化，必须重建整条链（§5.4.1）
+        {
+            const float res_scale = unpack_float(params_.flags[1]);
+            const bool extent_changed = (chain_extent_.width != swapchain_extent_.width ||
+                                        chain_extent_.height != swapchain_extent_.height);
+            const bool scale_changed = (res_scale != chain_res_scale_);
+            if (chain_.ready() && (extent_changed || scale_changed) && device_ != VK_NULL_HANDLE) {
+                vkDeviceWaitIdle(device_);
+                chain_.destroy();
+                create_chain();
+            }
+        }
         if (device_ == VK_NULL_HANDLE || window_ == nullptr) {
             return;
         }
@@ -231,7 +246,7 @@ public:
 
     void set_shader_root(const std::string& root) override { shader_root_ = root; }
 
-    bool pipeline_ready() const override { return false; }
+    bool pipeline_ready() const override { return chain_.ready(); }
 
     const std::string& last_error() const override { return last_error_; }
 
@@ -242,26 +257,34 @@ public:
     }
 
     bool capture_ldr(std::vector<unsigned char>& rgb, int& width, int& height) override {
-        (void)rgb;
-        (void)width;
-        (void)height;
-        last_error_ = "Vulkan 的后处理链与 LDR 回读将在 T1.6 实现（当前仅 GL 可用）";
-        return false;
+        if (!chain_.ready() || swapchain_images_.empty()) {
+            last_error_ = "Vulkan 渲染链未就绪，无法回读 LDR";
+            return false;
+        }
+        // 从最近一帧呈现所用的交换链图像回读（final pass 直接画在那里）
+        const VkImage image = swapchain_images_[std::min<std::size_t>(image_index_,
+                                                                     swapchain_images_.size() - 1)];
+        return chain_.read_ldr(image, rgb, width, height);
     }
 
     /// 物理设备能力清单：T1.6 的实现选型依据（尤其 shaderFloat64 —— Intel 核显不原生支持，
     /// 直接决定 Vulkan 侧能否走 mixed/fp64，见 DESIGN §7 精度模式）。
     bool rebuild_pipeline(const std::vector<std::string>& shader_defines) override {
-        // 记录规整后的宏（T1.6.1 的管线重建将直接使用它）：恒含 EHE_VULKAN，fp64 不可用时含 EHE_FP32_ONLY
+        // 规整宏（恒含 EHE_VULKAN；fp64 不可用时加 EHE_FP32_ONLY），随后重建整条链
         requested_defines_ = effective_shader_defines(shader_defines);
         std::string list;
         for (const std::string& define : requested_defines_) {
             list += define;
             list += " ";
         }
-        std::printf("[vk] 请求精度宏：%s\n", list.c_str());
-        last_error_ = "Vulkan 的 raymarch/后处理管线在 T1.6.1 落地，暂不支持重建";
-        return false;
+        std::printf("[vk] 重建管线，精度宏：%s\n", list.c_str());
+        if (device_ == VK_NULL_HANDLE) {
+            last_error_ = "设备未就绪，无法重建管线";
+            return false;
+        }
+        vkDeviceWaitIdle(device_);
+        chain_.destroy();
+        return create_chain();
     }
 
     std::string capability_report() const override {
@@ -324,11 +347,12 @@ public:
     }
 
     bool capture_hdr(std::vector<float>& rgb, int& width, int& height) override {
-        (void)rgb;
-        (void)width;
-        (void)height;
-        last_error_ = "Vulkan 后端的 raymarch 管线与 HDR 回读将在 T1.6 实现（当前仅 GL 可用）";
-        return false;
+        if (!chain_.ready()) {
+            last_error_ = "Vulkan 渲染链未就绪，无法回读 HDR";
+            return false;
+        }
+        // 与 GL 后端同语义：输出分辨率、分辨率变换之后、色调映射之前的 HDR（§6.1）
+        return chain_.read_hdr(rgb, width, height);
     }
 
 private:
@@ -682,6 +706,42 @@ private:
         return true;
     }
 
+    /// 创建渲染链（raymarch + 后处理，T1.6.1）。要求交换链与 render pass 已就绪。
+    bool create_chain() {
+        if (device_ == VK_NULL_HANDLE || render_pass_ == VK_NULL_HANDLE ||
+            swapchain_extent_.width == 0 || swapchain_extent_.height == 0) {
+            last_error_ = "设备/交换链未就绪，无法创建渲染链";
+            return false;
+        }
+        const float res_scale = unpack_float(params_.flags[1]);
+        const double scale = (res_scale > 0.0F) ? static_cast<double>(res_scale) : 1.0;
+
+        ChainInitInfo info{};
+        info.physical_device = physical_device_;
+        info.device = device_;
+        info.queue = queue_;
+        info.queue_family = queue_family_;
+        info.swapchain_render_pass = render_pass_;
+        info.output_extent = swapchain_extent_;
+        info.internal_extent = {
+            std::max(1U, static_cast<std::uint32_t>(std::lround(swapchain_extent_.width * scale))),
+            std::max(1U, static_cast<std::uint32_t>(std::lround(swapchain_extent_.height * scale)))};
+        info.shader_root = shader_root_.empty() ? std::string("shaders") : shader_root_;
+        // 宏规整：恒含 EHE_VULKAN；设备不支持 fp64 时含 EHE_FP32_ONLY
+        info.shader_defines = requested_defines_.empty() ? effective_shader_defines({})
+                                                         : requested_defines_;
+        info.lut_path = info.shader_root + "/blackbody_lut.f32";
+
+        if (!chain_.init(info)) {
+            last_error_ = chain_.last_error();
+            std::fprintf(stderr, "[vk] 渲染链初始化失败：%s\n", last_error_.c_str());
+            return false;
+        }
+        chain_extent_ = swapchain_extent_;
+        chain_res_scale_ = res_scale;
+        return true;
+    }
+
     bool create_commands() {
         VkCommandPoolCreateInfo pool_info{};
         pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -784,6 +844,20 @@ private:
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(cmd, &begin);
 
+        const float res_scale = unpack_float(params_.flags[1]);
+        const bool fxaa_enabled = (params_.flags[0] & kFlagFxaa) != 0U;
+        const bool aces_enabled = (params_.flags[0] & kFlagAces) != 0U;
+
+        // ---- 离屏链（raymarch → 分辨率变换 → FXAA）必须在交换链 render pass **之前**录制 ----
+        if (chain_.ready()) {
+            FinalParams final_params{};
+            final_params.exposure_and_chroma[0] = params_.disk[2];  // exposure
+            final_params.exposure_and_chroma[1] = params_.disk[3];  // chroma_ab
+            final_params.flags[0] = aces_enabled ? 1.0F : 0.0F;
+            chain_.upload_uniforms(current_frame_, params_, final_params, res_scale);
+            chain_.record_offscreen(cmd, current_frame_, params_, res_scale, fxaa_enabled);
+        }
+
         VkClearValue clear{};
         clear.color = {{0.02F, 0.02F, 0.03F, 1.0F}};
 
@@ -796,6 +870,12 @@ private:
         pass.clearValueCount = 1;
         pass.pClearValues = &clear;
         vkCmdBeginRenderPass(cmd, &pass, VK_SUBPASS_CONTENTS_INLINE);
+
+        // final pass（ACES/曝光/色差 → sRGB）画进交换链；ImGui 随后在同一 render pass 内叠加。
+        // 与 GL 后端的链序一致（§4.6），区别只是 VK 侧不需要额外的 blit pass。
+        if (chain_.ready()) {
+            chain_.record_final_in_pass(cmd, current_frame_, aces_enabled);
+        }
     }
 
     void recreate_swapchain() {
@@ -906,6 +986,9 @@ private:
     std::vector<VkFramebuffer> framebuffers_;
 
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
+    RaymarchChain chain_;      ///< raymarch + 后处理链（T1.6.1）
+    VkExtent2D chain_extent_{};      ///< 建链时的交换链尺寸（变了要重建）
+    float chain_res_scale_ = 1.0F;   ///< 建链时的 res_scale（变了要重建）
     FrameSync frames_[kFramesInFlight];
     uint32_t current_frame_ = 0;
     uint32_t image_index_ = 0;
