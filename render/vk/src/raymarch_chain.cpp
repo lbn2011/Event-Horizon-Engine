@@ -160,7 +160,18 @@ struct RaymarchChain::Impl {
         allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         allocate.allocationSize = requirements.size;
         allocate.memoryTypeIndex = type;
-        return vkAllocateMemory(info.device, &allocate, nullptr, &memory) == VK_SUCCESS;
+        if (vkAllocateMemory(info.device, &allocate, nullptr, &memory) != VK_SUCCESS) {
+            return false;
+        }
+        // 绑定图像内存——分配 ≠ 绑定。缺这一步图像就没有后备存储，所有创建类调用都
+        // "成功"，首次 GPU 访问即 page fault → DEVICE_LOST（真机 Iris Xe 2026-09-19：
+        // LUT copy 是链内第一条访问图像的提交，init 与两次 rebuild 全部同样挂）。
+        const VkResult bound = vkBindImageMemory(info.device, image, memory, 0);
+        if (bound != VK_SUCCESS) {
+            std::fprintf(stderr, "[vk] 绑定图像内存失败%s\n", vk_result_name(bound).c_str());
+            return false;
+        }
+        return true;
     }
 
     bool create_view(VkImage image, VkFormat format, VkImageView& view) {
@@ -323,7 +334,7 @@ bool RaymarchChain::init(const ChainInitInfo& info) {
         }
         impl_->fragment_modules[static_cast<std::size_t>(pass)] = make_module(fragment.words);
     }
-    std::printf("[vk] 5 个 shader 模块就绪（SPIR-V；精度宏：", 0);
+    std::printf("[vk] 5 个 shader 模块就绪（SPIR-V；精度宏：");
     for (const std::string& define : info.shader_defines) {
         std::printf("%s ", define.c_str());
     }

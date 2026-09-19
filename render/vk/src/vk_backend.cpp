@@ -49,6 +49,24 @@ void check_vk(VkResult result) {
     }
 }
 
+/// 验证层回调（T1.6.4 真机诊断）：违规详情直接进 stderr，替代"猜 DEVICE_LOST 根因"。
+VKAPI_ATTR VkBool32 VKAPI_CALL debug_utils_callback(
+    VkDebugUtilsMessageSeverityFlagBitsEXT severity, VkDebugUtilsMessageTypeFlagsEXT /*types*/,
+    const VkDebugUtilsMessengerCallbackDataEXT* data, void* /*user_data*/) {
+    std::fprintf(stderr, "[vk] 验证层（%s%s%s）：%s\n",
+                 (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ? "错误" : "",
+                 (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) ? "警告" : "",
+                 (severity & (VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
+                              VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT))
+                     ? ""
+                     : "提示",
+                 data->pMessage != nullptr ? data->pMessage : "(无消息内容)");
+    if (data->pMessageIdName != nullptr) {
+        std::fprintf(stderr, "    id=%s\n", data->pMessageIdName);
+    }
+    return VK_FALSE;
+}
+
 class VKBackend final : public IRenderer {
 public:
     Backend backend() const override { return Backend::Vulkan; }
@@ -354,7 +372,7 @@ public:
         report += shader_float64_supported_
                       ? "[VK] 精度策略：mixed(fp64) 可用（已启用 shaderFloat64）\n"
                       : "[VK] 精度策略：**强制 fp32**（该设备 shaderFloat64=0，fp64 流水线无法创建）\n";
-        report += "[VK] 说明：raymarch/后处理管线仍在 T1.6.1 落地中，当前 VK 仅用于起窗与能力探测\n";
+        report += "[VK] 说明：raymarch/后处理管线已实现（T1.6.1-3 已合并），当前处于目标机运行验证期（T1.6.4）\n";
         return report;
     }
 
@@ -378,6 +396,50 @@ private:
             return false;
         }
 
+        // ---- 验证层 + debug messenger（T1.6.4 真机诊断，2026-09-19）----
+        // 目标机装了 Vulkan SDK（vulkaninfo 可见 VK_LAYER_KHRONOS_validation），默认启用：
+        // 任何违规（如未绑定图像内存）都会在 DEVICE_LOST 之前打出可读的违规详情。
+        // EHE_VK_VALIDATE=0 可关闭；T1.9 正式发布前把默认值改为关闭。
+        const char* validate_env = std::getenv("EHE_VK_VALIDATE");
+        const bool want_validation = (validate_env == nullptr || std::strcmp(validate_env, "0") != 0);
+
+        std::vector<const char*> layer_names;
+        if (want_validation) {
+            uint32_t layer_count = 0;
+            vkEnumerateInstanceLayerProperties(&layer_count, nullptr);
+            std::vector<VkLayerProperties> layers(layer_count);
+            if (layer_count > 0) {
+                vkEnumerateInstanceLayerProperties(&layer_count, layers.data());
+            }
+            for (const VkLayerProperties& layer : layers) {
+                if (std::strcmp(layer.layerName, "VK_LAYER_KHRONOS_validation") == 0) {
+                    layer_names.push_back("VK_LAYER_KHRONOS_validation");
+                    std::printf("[vk] 验证层已启用（EHE_VK_VALIDATE=0 可关闭）\n");
+                    break;
+                }
+            }
+        }
+
+        std::vector<const char*> all_extensions(extensions, extensions + extension_count);
+        bool debug_utils_available = false;
+        {
+            uint32_t prop_count = 0;
+            vkEnumerateInstanceExtensionProperties(nullptr, &prop_count, nullptr);
+            std::vector<VkExtensionProperties> props(prop_count);
+            if (prop_count > 0) {
+                vkEnumerateInstanceExtensionProperties(nullptr, &prop_count, props.data());
+            }
+            for (const VkExtensionProperties& prop : props) {
+                if (std::strcmp(prop.extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == 0) {
+                    debug_utils_available = true;
+                    break;
+                }
+            }
+        }
+        if (debug_utils_available) {
+            all_extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        }
+
         VkApplicationInfo app{};
         app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
         app.pApplicationName = "Event Horizon Engine";
@@ -385,19 +447,39 @@ private:
         app.pEngineName = "EHE";
         app.apiVersion = VK_API_VERSION_1_2;  // 底线 Vulkan 1.2（DESIGN §2.1）
 
+        // messenger 挂到 instance pNext：instance 创建/销毁期间的违规也能被捕获
+        VkDebugUtilsMessengerCreateInfoEXT messenger{};
+        if (debug_utils_available) {
+            messenger.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+            messenger.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                                        VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+            messenger.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                                    VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                                    VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+            messenger.pfnUserCallback = debug_utils_callback;
+        }
+
         VkInstanceCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+        info.pNext = debug_utils_available ? &messenger : nullptr;
         info.pApplicationInfo = &app;
-        info.enabledExtensionCount = extension_count;
-        info.ppEnabledExtensionNames = extensions;
+        info.enabledLayerCount = static_cast<uint32_t>(layer_names.size());
+        info.ppEnabledLayerNames = layer_names.empty() ? nullptr : layer_names.data();
+        info.enabledExtensionCount = static_cast<uint32_t>(all_extensions.size());
+        info.ppEnabledExtensionNames = all_extensions.data();
 
         const VkResult result = vkCreateInstance(&info, nullptr, &instance_);
         if (result != VK_SUCCESS) {
-            std::fprintf(stderr, "[vk] 创建实例失败（%d）：驱动可能不支持 Vulkan 1.2\n",
-                         static_cast<int>(result));
+            std::fprintf(stderr, "[vk] 创建实例失败（%d）：驱动可能不支持 Vulkan 1.2%s\n",
+                         static_cast<int>(result),
+                         layer_names.empty() ? ""
+                                             : "（已请求验证层，罕见不兼容；可设 EHE_VK_VALIDATE=0 重试）");
             return false;
         }
         volkLoadInstance(instance_);
+        if (debug_utils_available) {
+            vkCreateDebugUtilsMessengerEXT(instance_, &messenger, nullptr, &debug_messenger_);
+        }
         return true;
     }
 
@@ -982,6 +1064,7 @@ private:
     bool shader_float64_supported_ = false;  ///< VK 设备是否支持 fp64（不支持则强制 fp32，V5.10 约定③）
 
     VkInstance instance_ = VK_NULL_HANDLE;
+    VkDebugUtilsMessengerEXT debug_messenger_ = VK_NULL_HANDLE;
     VkSurfaceKHR surface_ = VK_NULL_HANDLE;
     VkPhysicalDevice physical_device_ = VK_NULL_HANDLE;
     VkPhysicalDeviceProperties physical_device_properties_{};
