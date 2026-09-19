@@ -1155,14 +1155,17 @@ void RaymarchChain::record_present(VkCommandBuffer cmd, VkImage dst_image, VkExt
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &to_dst);
 
-    // 线性拉伸 blit：请求分辨率（LDR）→ 窗口尺寸（交换链）。与 GL 的 glBlitFramebuffer 同构。
+    // 线性拉伸 blit：请求分辨率（LDR）→ 窗口尺寸（交换链）。
+    // 垂直镜像（dst y 反向）：LDR 图 row 0 = 世界下方（与 GL 的 FBO row 域同语义），
+    // 交换链 row 0 显示在屏幕顶部，故需镜像才能让屏幕顶部 = 世界上方——
+    // 与 GL 交互显示（FBO row 0 落在屏幕底部）方向一致（真机五轮：读回翻转 + 呈现镜像）。
     VkImageBlit blit{};
     blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     blit.srcOffsets[1] = {static_cast<std::int32_t>(output.width),
                           static_cast<std::int32_t>(output.height), 1};
     blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    blit.dstOffsets[1] = {static_cast<std::int32_t>(dst_extent.width),
-                          static_cast<std::int32_t>(dst_extent.height), 1};
+    blit.dstOffsets[0] = {0, static_cast<std::int32_t>(dst_extent.height), 0};
+    blit.dstOffsets[1] = {static_cast<std::int32_t>(dst_extent.width), 0, 1};
     vkCmdBlitImage(cmd, impl_->ldr_image, VK_IMAGE_LAYOUT_GENERAL, dst_image,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
 
@@ -1207,13 +1210,24 @@ bool RaymarchChain::read_hdr(std::vector<float>& out, int& width, int& height) {
         return false;
     }
 
-    // 图像格式 RGBA16F → 转 float RGB（Vulkan 图像原点在左上，与 core 的"第 0 行 = 顶部"一致，无需翻转）
+    // 图像格式 RGBA16F → 转 float RGB。
+    // 行序：拷贝从图像 row 0 开始（= v_uv.y=0 = 世界下方，与 GL 的 FBO row 0 同语义），
+    // 而 core 约定"第 0 行 = 顶部" → 逐行翻转（与 gl_backend capture_hdr 完全同构；
+    // 旧注释"原点在左上与 core 一致无需翻转"混淆了显示方向与数据行序，真机
+    // NMSE=1.83 的根因之一，2026-09-20）
+    std::vector<std::uint16_t> flipped(static_cast<std::size_t>(width) * height * 4);
+    const std::size_t row_pixels = static_cast<std::size_t>(width);
+    for (int y = 0; y < height; ++y) {
+        const auto* src = static_cast<const std::uint16_t*>(impl_->readback_mapped) +
+                          static_cast<std::size_t>(height - 1 - y) * row_pixels * 4;
+        std::memcpy(flipped.data() + static_cast<std::size_t>(y) * row_pixels * 4, src,
+                    row_pixels * 4 * sizeof(std::uint16_t));
+    }
     out.assign(static_cast<std::size_t>(3) * width * height, 0.0F);
-    const auto* source_pixels = static_cast<const std::uint16_t*>(impl_->readback_mapped);
     for (std::size_t i = 0; i < static_cast<std::size_t>(width) * height; ++i) {
-        out[i * 3 + 0] = half_to_float(source_pixels[i * 4 + 0]);
-        out[i * 3 + 1] = half_to_float(source_pixels[i * 4 + 1]);
-        out[i * 3 + 2] = half_to_float(source_pixels[i * 4 + 2]);
+        out[i * 3 + 0] = half_to_float(flipped[i * 4 + 0]);
+        out[i * 3 + 1] = half_to_float(flipped[i * 4 + 1]);
+        out[i * 3 + 2] = half_to_float(flipped[i * 4 + 2]);
     }
     return true;
 }
@@ -1239,20 +1253,30 @@ bool RaymarchChain::read_ldr(std::vector<unsigned char>& out, int& width, int& h
         return false;
     }
 
-    // 离屏 LDR 图格式 = 交换链格式（多数设备 B8G8R8A8，少数 R8G8B8A8）→ 按实际通道序转 RGB
+    // 离屏 LDR 图格式 = 交换链格式（多数设备 B8G8R8A8，少数 R8G8B8A8）→ 按实际通道序转 RGB。
+    // 行序：拷贝从图像 row 0 开始（= 世界下方）→ 逐行翻转对齐 core"第 0 行 = 顶部"
+    //（与 read_hdr 同理，与 gl_backend capture_ldr 同构）
     const VkFormat format = impl_->info.swapchain_format;
+    const auto* source_pixels = static_cast<const unsigned char*>(impl_->readback_mapped);
+    std::vector<unsigned char> flipped(static_cast<std::size_t>(width) * height * 4);
+    const std::size_t row_pixels = static_cast<std::size_t>(width);
+    for (int y = 0; y < height; ++y) {
+        const auto* src = source_pixels +
+                          static_cast<std::size_t>(height - 1 - y) * row_pixels * 4;
+        std::memcpy(flipped.data() + static_cast<std::size_t>(y) * row_pixels * 4, src,
+                    row_pixels * 4);
+    }
     const bool bgra = (format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB);
     out.assign(static_cast<std::size_t>(3) * width * height, 0);
-    const auto* source_pixels = static_cast<const unsigned char*>(impl_->readback_mapped);
     for (std::size_t i = 0; i < static_cast<std::size_t>(width) * height; ++i) {
         if (bgra) {
-            out[i * 3 + 0] = source_pixels[i * 4 + 2];  // R ← B 通道
-            out[i * 3 + 1] = source_pixels[i * 4 + 1];
-            out[i * 3 + 2] = source_pixels[i * 4 + 0];  // B ← R 通道
+            out[i * 3 + 0] = flipped[i * 4 + 2];  // R ← B 通道
+            out[i * 3 + 1] = flipped[i * 4 + 1];
+            out[i * 3 + 2] = flipped[i * 4 + 0];  // B ← R 通道
         } else {
-            out[i * 3 + 0] = source_pixels[i * 4 + 0];
-            out[i * 3 + 1] = source_pixels[i * 4 + 1];
-            out[i * 3 + 2] = source_pixels[i * 4 + 2];
+            out[i * 3 + 0] = flipped[i * 4 + 0];
+            out[i * 3 + 1] = flipped[i * 4 + 1];
+            out[i * 3 + 2] = flipped[i * 4 + 2];
         }
     }
     return true;
