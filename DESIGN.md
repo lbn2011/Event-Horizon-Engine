@@ -1,4 +1,4 @@
-# Event Horizon Engine (EHE) — 开发文档 V5.16
+# Event Horizon Engine (EHE) — 开发文档 V5.17
 
 > **本文档是 EHE 项目开发的唯一权威依据。** 原始需求对话（`黑洞渲染模拟：Kerr度规光线....json`）仅为历史参考，
 > 凡本文档与对话冲突之处，以本文档为准。本文档不含代码；修改本文档需明确提出并递增版本号。
@@ -153,6 +153,25 @@
 >   修复：usage 按需 OR 上 TRANSFER_DST（先查 surface caps.supportedUsageFlags，非规范保证项）。
 >   教训：#47 改"呈现方式"时只顾了离屏侧，呈现目标（交换链）的创建参数没跟着改——**改哪条
 >   数据通路，通路两端的资源创建参数都要过一遍**。
+> V5.17（2026-09-20 真机六轮）：**VK 读回/呈现行序翻转——NMSE=1.83 的真正根因**。
+>   #48 真机复跑：caps.err.txt = 0 KB（TRANSFER_DST 修复生效，blit 全合规）、尺寸解耦持续
+>   正确（32×32），但 VK smoke NMSE=1.828643e+00 与 #47 轮**逐位相同**——确定性错误图像，
+>   且与 usage 合规与否无关 → 错误在离屏链本身。结合四轮截图（VK"上白下黑"），定位为
+>   **垂直镜像**：
+>   - 两 API 的渲染/采样约定其实一致（图像 row 0 ↔ NDC y=-1 ↔ v_uv.y=0 = 世界下方；
+>     采样 v=0 ↔ row 0），post 链在 VK 下本就自洽——shader 无需改动；
+>   - core/golden 约定"第 0 行 = 顶部"（世界上方）。GL 读回（glReadPixels）首行 = row 0 =
+>     世界下方 → capture_hdr/capture_ldr **逐行翻转**对齐（GL 一直是对的）；
+>   - VK 读回（vkCmdCopyImageToBuffer）首行同为 row 0 = 世界下方，但 read_hdr/read_ldr
+>     **漏了翻转**（旧注释"Vulkan 原点在左上与 core 一致无需翻转"混淆了屏幕显示方向与
+>     数据行序）→ 读回图像垂直镜像 → NMSE=1.83；
+>   - 交互显示同理：LDR row 0（世界下方）经 blit 落在交换链 row 0（屏幕顶部）→ 屏幕颠倒。
+>   修复（全在 raymarch_chain.cpp，GL/VK 链域约定零改动）：
+>   ① read_hdr / read_ldr 读回后逐行翻转（与 gl_backend capture_* 同构）；
+>   ② record_present 的 blit 用反向 dstOffsets（y0=H、y1=0）做垂直镜像，屏幕顶部 = 世界上方。
+>   开发机：编译零警告、68 用例/41861 断言全绿、GL smoke 1.625e-04 不变（shader 未动，
+>   GL 链不受影响）。教训：**行序约定要沿"渲染 → 采样 → 读回 → 呈现"全链核对**，
+>   "图像原点在左上"说的是屏幕方向，不决定数据第 0 行与 CPU 侧的对应关系。
 
 ---
 

@@ -1,4 +1,4 @@
-# EHE 任务拆解 V1.19
+# EHE 任务拆解 V1.20
 
 > 执行清单，与 `DESIGN.md`（规格权威）配套使用。冲突时以 DESIGN.md 为准。
 > 每条任务：可勾选状态、验收标准、依赖、产出物。完成后勾 `[x]` 并注明日期。
@@ -10,6 +10,7 @@
 > → V1.17（T1.6.4 三轮真机验证：VK 建链成功 + 验证层 4 处合规问题修复）。
 > → V1.18（T1.6.4 四轮：VK 渲染尺寸与窗口解耦——离屏 LDR + blit 呈现，GL 同构方案）。
 > → V1.19（T1.6.4 五轮：解耦真机验证通过（输出 32×32 ✓）；交换链 usage 补 TRANSFER_DST）。
+> → V1.20（T1.6.4 六轮：VK 读回/呈现行序翻转——NMSE=1.83 真正根因）。
 
 图例：🏁 = 里程碑验收门；⛓ = 有前置依赖；产出物用 `代码格式` 标注。
 
@@ -290,6 +291,17 @@
         非法 usage 下 GPU 行为未定义 → VK smoke NMSE=1.83；修复 = usage 按
         supportedUsageFlags 择机 OR 上 TRANSFER_DST
       - ⏳ 等新包复跑：caps 与 VK smoke 应零验证层报错；VK smoke NMSE 与 GL 同量级 → T1.6.4 收官、T1.6 关单
+      - 2026-09-20 六轮（#49）：caps.err=0KB（#48 usage 修复生效）但 VK smoke NMSE=1.828643e+00
+        与 #47 轮**逐位相同**——确定性错误图像，与 blit 目标合法性无关（Iris Xe 对违规 usage
+        实际宽容执行）。真正根因 = **VK 读回行序未翻转（垂直镜像）**：两 API 渲染/采样约定
+        完全一致（图像 row 0 ↔ NDC y=-1 ↔ v_uv.y=0 = 世界下方），core 约定"第 0 行 = 顶部"，
+        GL `capture_hdr/capture_ldr` 一直逐行翻转补偿、VK `read_hdr/read_ldr` 漏翻转（旧注释
+        "Vulkan 原点在左上与 core 一致无需翻转"混淆了屏幕显示方向与数据行序）；修复 =
+        read_hdr/read_ldr 读回后逐行翻转（与 GL capture_* 同构）+ `record_present` blit 用
+        反向 dstOffsets（y0=H、y1=0）垂直镜像（屏幕顶部 = 世界上方，与 GL 呈现方向一致）；
+        shader/post 链不动（第一假设"EHE_VULKAN 翻转 v_ndc"已推导否决：会破坏写入与采样的
+        行序自洽）。开发机：编译零警告、68 用例/41861 断言全过、GL smoke NMSE=1.625070e-04 复核不变
+      - ⏳ 等新包复跑：caps 零报错；VK smoke NMSE 与 GL 同量级（~1e-4，不再是 1.83）→ T1.6.4 收官、T1.6 关单
 
 ### T1.7 UI 完整化 ⛓T1.3
 - [ ] T1.7.1 面板 7 组全参数（§8 表逐项）+ 自旋 a 灰显锁定
