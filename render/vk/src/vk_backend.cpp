@@ -150,6 +150,11 @@ public:
             surface_ = VK_NULL_HANDLE;
         }
         if (instance_ != VK_NULL_HANDLE) {
+            // messenger 须在销毁实例前销毁，否则验证层报 VUID-vkDestroyInstance-instance-00629 泄漏
+            if (debug_messenger_ != VK_NULL_HANDLE) {
+                vkDestroyDebugUtilsMessengerEXT(instance_, debug_messenger_, nullptr);
+                debug_messenger_ = VK_NULL_HANDLE;
+            }
             vkDestroyInstance(instance_, nullptr);
             instance_ = VK_NULL_HANDLE;
         }
@@ -208,7 +213,6 @@ public:
             skip_frame_ = true;
             return;
         }
-        vkResetFences(device_, 1, &frame.in_flight);
         vkResetCommandBuffer(frame.cmd, 0);
         record_commands(frame.cmd, image_index_);
         image_acquired_ = true;
@@ -226,6 +230,12 @@ public:
         ImGui::Render();
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), frame.cmd);
         vkCmdEndRenderPass(frame.cmd);
+        // 修复：此前从未调用 vkEndCommandBuffer 就提交（真机验证层抓出
+        // VUID-vkQueueSubmit-pCommandBuffers-00070，Iris Xe 2026-09-19）
+        check_vk(vkEndCommandBuffer(frame.cmd));
+
+        // fence 重置放在提交前：begin 失败路径不提交时 fence 仍 signaled，下一帧等待立即通过不会挂死
+        vkResetFences(device_, 1, &frame.in_flight);
 
         VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         VkSubmitInfo submit{};
@@ -889,17 +899,22 @@ private:
         }
         ImGui::StyleColorsDark();
 
-        VkDescriptorPoolSize pool_size{};
-        pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        pool_size.descriptorCount = 64;
+        // ImGui 1.92+ 新纹理系统：外部提供的池必须含 SAMPLED_IMAGE + SAMPLER 两类描述符
+        //（IMGUI_IMPL_VULKAN_MINIMUM_*_POOL_SIZE，imgui_impl_vulkan.h:81）。
+        // 旧代码只给 COMBINED_IMAGE_SAMPLER → 真机验证层报
+        // WARNING-CoreValidation-AllocateDescriptorSets-WrongType（Iris Xe 2026-09-19）
+        const VkDescriptorPoolSize pool_sizes[2] = {
+            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE},
+            {VK_DESCRIPTOR_TYPE_SAMPLER, IMGUI_IMPL_VULKAN_MINIMUM_SAMPLER_POOL_SIZE},
+        };
 
         VkDescriptorPoolCreateInfo pool_info{};
         pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         // ImGui 后端要求池带 FREE_DESCRIPTOR_SET_BIT
         pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
         pool_info.maxSets = 64;
-        pool_info.poolSizeCount = 1;
-        pool_info.pPoolSizes = &pool_size;
+        pool_info.poolSizeCount = 2;
+        pool_info.pPoolSizes = pool_sizes;
         if (vkCreateDescriptorPool(device_, &pool_info, nullptr, &imgui_descriptor_pool_) != VK_SUCCESS) {
             std::fprintf(stderr, "[vk] 创建 ImGui 描述符池失败\n");
             return false;
@@ -936,7 +951,13 @@ private:
         VkCommandBufferBeginInfo begin{};
         begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(cmd, &begin);
+        if (vkBeginCommandBuffer(cmd, &begin) != VK_SUCCESS) {
+            // begin 失败时本帧不提交：fence 重置已移至 end_frame 提交前，此处返回后
+            // fence 仍 signaled，下一帧等待立即通过，不会挂死（实际几乎不发生）
+            std::fprintf(stderr, "[vk] begin 命令缓冲失败\n");
+            skip_frame_ = true;
+            return;
+        }
 
         const float res_scale = unpack_float(params_.flags[1]);
         const bool fxaa_enabled = (params_.flags[0] & kFlagFxaa) != 0U;

@@ -1,4 +1,4 @@
-# Event Horizon Engine (EHE) — 开发文档 V5.12
+# Event Horizon Engine (EHE) — 开发文档 V5.14
 
 > **本文档是 EHE 项目开发的唯一权威依据。** 原始需求对话（`黑洞渲染模拟：Kerr度规光线....json`）仅为历史参考，
 > 凡本文档与对话冲突之处，以本文档为准。本文档不含代码；修改本文档需明确提出并递增版本号。
@@ -105,6 +105,21 @@
 >   修复：`create_image` 补绑定并检查返回值（一处覆盖内部 HDR + 2×输出 + LUT 共 4 张图）。
 >   同时接入 **VK_LAYER_KHRONOS_validation + VK_EXT_debug_utils**（目标机已装 SDK 层，vulkaninfo 可见）：
 >   违规详情会在 DEVICE_LOST 之前直接进 stderr；`EHE_VK_VALIDATE=0` 可关闭，T1.9 正式发布前改默认关闭。
+> V5.14（2026-09-19 真机三轮）：**内存绑定修复真机验证通过**（VK 首次建链成功：LUT 上传 ✓、
+>   init + 两次 rebuild 全部就绪、`[caps] vulkan fp32 管线就绪`，DEVICE_LOST 消失），且验证层
+>   接入立即回本——抓出 4 处 VK 合规问题，一并修复：
+>   ① **`vkCreateImage.initialLayout` 必须是 UNDEFINED/PREINITIALIZED**（VUID-VkImageCreateInfo-initialLayout-00993）：
+>      "GENERAL 免过渡"约定只对**使用中**合法，创建时必须 UNDEFINED，首次使用前显式过渡
+>      UNDEFINED→GENERAL（4 张图合并在 LUT 上传提交里一次做完，之后约定不变）；
+>   ② **帧提交漏 vkEndCommandBuffer**（VUID-vkQueueSubmit-pCommandBuffers-00070）：record 里 begin、
+>      end_frame 里 submit，唯独没有 end——每个提交都被验证层记为违规；修复时把 fence 重置移到
+>      提交前，begin 失败路径不再有"fence 永不 signaled → 下帧挂死"隐患；
+>   ③ **ImGui 1.92+ 新纹理系统**：外部提供描述符池必须含 SAMPLED_IMAGE + SAMPLER 两类描述符
+>      （IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE=8 / MINIMUM_SAMPLER_POOL_SIZE=2），
+>      只给 COMBINED_IMAGE_SAMPLER 会报 AllocateDescriptorSets-WrongType（旧版写法已过时）；
+>   ④ **messenger 须在 vkDestroyInstance 前销毁**（VUID-vkDestroyInstance-instance-00629）。
+>   另：GL 侧 512×512 抹烟本轮 NMSE=1.000（输出全 0 的特征值；疑 TDR——单帧 3423ms > Win10 默认
+>   TdrDelay 2s，同机当日早些时候 2516ms 实测达标 5.654e-04），待复跑确认，非代码缺陷。
 
 ---
 
