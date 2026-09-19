@@ -97,6 +97,14 @@
 >      alloc/bind/map/waitIdle 的返回值被吞，就无法区分"提交参数错"与"device lost 级联"。
 >      现约定：`last_error` 一律带 `vk_result_name(result)` 后缀。
 >   真机已验证：设备探测 / shaderFloat64=no → 强制 fp32（V5.10 约定③落地）/ 5 shader 编出 SPIR-V ✓。
+> V5.13（2026-09-19 真机二轮）：**LUT 首提交 DEVICE_LOST 根因定位——图像内存只分配未绑定**。
+>   `create_image` 在 `vkAllocateMemory` 后直接返回，从未调用 `vkBindImageMemory`：创建类调用全部
+>   "成功"，但图像没有后备存储，首次 GPU 访问即 page fault → `vkQueueSubmit`/`vkQueueWaitIdle` 返回
+>   DEVICE_LOST（LUT copy 是链内第一条访问图像的提交，init 与两次 rebuild 全部同样失败）。
+>   开发机无 ICD 走不到该路径，编译期查不出——与 V5.12① 同类：**"资源账目"错误只有真机能暴露**。
+>   修复：`create_image` 补绑定并检查返回值（一处覆盖内部 HDR + 2×输出 + LUT 共 4 张图）。
+>   同时接入 **VK_LAYER_KHRONOS_validation + VK_EXT_debug_utils**（目标机已装 SDK 层，vulkaninfo 可见）：
+>   违规详情会在 DEVICE_LOST 之前直接进 stderr；`EHE_VK_VALIDATE=0` 可关闭，T1.9 正式发布前改默认关闭。
 
 ---
 
