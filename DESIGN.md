@@ -1,4 +1,4 @@
-# Event Horizon Engine (EHE) — 开发文档 V5.8
+# Event Horizon Engine (EHE) — 开发文档 V5.9
 
 > **本文档是 EHE 项目开发的唯一权威依据。** 原始需求对话（`黑洞渲染模拟：Kerr度规光线....json`）仅为历史参考，
 > 凡本文档与对话冲突之处，以本文档为准。本文档不含代码；修改本文档需明确提出并递增版本号。
@@ -53,6 +53,20 @@
 >   ② 采样坐标改「极坐标 + 弱垂直变化」（裸 3D 噪声会被长穿盘路径平均掉）；
 >   ③ 新增 `blackhole.disk_noise ∈ [0,1]`（默认 0.35；**golden 参数文件显式写 0**，噪声不进 NMSE 差分）；
 >   ④ UBO extras.w 复用为噪声振幅（追加语义，不改字段顺序）。
+> V5.9（2026-09-19）：**T1.5 后处理链落地（FSR1 除外）**，§4.6 增补 4 处实现要点：
+>   ① **链序实现**：raymarch（内部分辨率 FP16）→ 分辨率变换（SSAA 面积加权降采样 / Catmull-Rom 升频，互斥）
+>      → FXAA → final（曝光 → **ACES Hill 拟合** → 色差 → sRGB）→ blit 呈现；
+>   ② **SSAA 用面积加权**（不是整数倍才可用）：目标像素足迹投回源空间按重叠面积加权，
+>      因此 §7 的 1.25x / 1.5x 档位可用；整数倍时退化为等权平均（与手算一致，见单测）；
+>   ③ **FXAA 的 HDR 适配**：§4.6 把 FXAA 排在色调映射之前，但它的 luma 阈值是按 LDR 调的——
+>      直接吃 HDR 会让亮区全部判成强边缘而过模糊。实现上对**判据用的 luma 先做 Reinhard 压缩**
+>      （混合仍用原始 HDR 颜色），链序不破坏；
+>   ④ **后处理输出到独立 LDR 目标再 blit 呈现**（不直接写默认帧缓冲）：窗口尺寸可能被系统放大
+>      （离屏实测 32×32 → 120×32），直接写会让"成品尺寸 ≠ 输出分辨率"，无法与 CPU 参考逐像素对照。
+>   **验证**：新增 `smoke` 的 **post 一致性对照**（GPU 后处理成品 vs `core/tonemap.cpp` 同式 CPU 参考）——
+>   三条分辨率路径实测 **最大差 1/255、平均差 0.03/255**；`capture_hdr` 语义修正为
+>   "分辨率变换之后、色调映射之前"的输出分辨率 HDR（res_scale=1 时与旧行为**逐位一致**）。
+>   FXAA/FSR1 不在此对照内（前者 GPU 专有、后者待 T1.5.2 收尾）。
 
 ---
 
@@ -393,7 +407,9 @@ shaders/
 │   ├── noise.glsl       # hash/value noise/fbm
 │   └── simparams.glsl   # UBO 块声明（与 §5.3 布局一致，唯一来源）
 ├── fullscreen.vert      # 全屏三角形（3 顶点无 VBO，gl_VertexID 生成）
-├── present.frag         # 【T1.5 前占位】曝光 + Reinhard + sRGB；T1.5 由 post_final.frag 取代
+├── post_resolve.frag    # 分辨率变换（SSAA 面积加权降采样 / Catmull-Rom 升频，V5.9）
+├── post_fxaa.frag       # FXAA（HDR 适配：边缘判据用 Reinhard 压缩后的 luma）
+├── post_final.frag      # 曝光 → ACES（Hill 拟合）→ 色差 → sRGB
 ├── raymarch.frag        # 主积分循环 + 调试视图分支
 ├── particle.comp / particle.vert / particle.frag
 ├── post_fsr1_*.glsl     # FSR1 EASU/RCAS（GPUOpen 头文件）

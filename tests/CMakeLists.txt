@@ -19,6 +19,7 @@ add_executable(ehe_tests
   src/test_image_io.cpp
   src/test_repo_hygiene.cpp
   src/test_noise.cpp
+  src/test_tonemap.cpp
 )
 
 target_link_libraries(ehe_tests

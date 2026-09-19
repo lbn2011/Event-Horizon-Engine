@@ -241,6 +241,14 @@ public:
         }
     }
 
+    bool capture_ldr(std::vector<unsigned char>& rgb, int& width, int& height) override {
+        (void)rgb;
+        (void)width;
+        (void)height;
+        last_error_ = "Vulkan 的后处理链与 LDR 回读将在 T1.6 实现（当前仅 GL 可用）";
+        return false;
+    }
+
     /// 物理设备能力清单：T1.6 的实现选型依据（尤其 shaderFloat64 —— Intel 核显不原生支持，
     /// 直接决定 Vulkan 侧能否走 mixed/fp64，见 DESIGN §7 精度模式）。
     bool rebuild_pipeline(const std::vector<std::string>& shader_defines) override {

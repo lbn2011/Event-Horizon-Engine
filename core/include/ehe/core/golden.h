@@ -93,7 +93,11 @@ double redshift_factor(double k_dot_u_obs, const Vec4& k, const Vec4& u_em, cons
 /// 主渲染入口
 HdrImage render_golden(const GoldenParams& params, RenderStats* stats = nullptr);
 
-/// HDR 线性 → sRGB8（供 PNG 预览；ACES 等色调映射在 T1.5 接入）
-std::vector<std::uint8_t> tonemap_to_srgb8(const HdrImage& image, double exposure = 1.0);
+/// HDR 线性 → sRGB8（供 PNG 预览）。
+/// V5.9：T1.5 落地后默认走 **ACES（Hill 拟合）+ 曝光**，与屏幕上的 post_final.pass **同式**
+/// （core/tonemap.cpp），使"预览图与窗口所见一致"；aces=false 时退化为 Reinhard 作为对照。
+/// 注意：PFM 基线输出的是**线性 HDR 原值**，不经此处处理（DESIGN §6.3）。
+std::vector<std::uint8_t> tonemap_to_srgb8(const HdrImage& image, double exposure = 1.0,
+                                           bool aces = true);
 
 }  // namespace ehe::core
