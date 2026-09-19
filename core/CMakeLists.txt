@@ -17,6 +17,7 @@ add_library(ehe_core STATIC
   src/sha256.cpp
   src/image_io.cpp
   src/noise.cpp
+  src/tonemap.cpp
 )
 
 target_include_directories(ehe_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")

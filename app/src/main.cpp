@@ -285,6 +285,16 @@ int run_smoke(const Options& options) {
         renderer->shutdown();
         return 2;
     }
+
+    // 后处理链的 LDR 成品（在 shutdown 之前抓，否则上下文已销毁）
+    std::vector<unsigned char> post_rgb;
+    int post_width = 0;
+    int post_height = 0;
+    const bool has_post = renderer->capture_ldr(post_rgb, post_width, post_height);
+    if (!has_post) {
+        std::fprintf(stderr, "[smoke] 后处理输出回读失败（跳过 post 一致性校验）：%s\n",
+                     renderer->last_error().c_str());
+    }
     renderer->shutdown();
 
     ehe::core::HdrImageF image;
@@ -306,6 +316,47 @@ int run_smoke(const Options& options) {
     std::printf("[smoke] 输出 %s（%dx%d，%s，%d 帧）与 %s\n", pfm_path.c_str(), width, height,
                 ehe::render::backend_name(options.backend), options.smoke_frames, png_path.c_str());
 
+    // 3b) 后处理一致性：GPU 后处理成品 vs CPU 同式参考（core/tonemap.cpp）
+    //
+    // 为什么需要：后处理作用在 golden **之前**（PFM 是 post 前的 HDR，§6.1），不进 NMSE 差分，
+    // 因此它的正确性只能靠这条对照来证。色差开启时 CPU 侧未做同样采样，故跳过该情形。
+    if (has_post) {
+        const std::string post_png = options.shot + "_post.png";
+        stbi_write_png(post_png.c_str(), post_width, post_height, 3, post_rgb.data(),
+                       post_width * 3);
+        std::printf("[smoke] 后处理成品 %s（%dx%d）\n", post_png.c_str(), post_width, post_height);
+
+        if (config.post.chrom_ab > 0.0) {
+            std::printf("[smoke] 色差已开启（%.2f）→ 跳过与 CPU 参考的逐像素对照（CPU 未做同式采样）\n",
+                        config.post.chrom_ab);
+        } else {
+            const auto reference = ehe::core::tonemap_to_srgb8(image, config.post.exposure,
+                                                               config.post.aces);
+            if (reference.size() == post_rgb.size()) {
+                int max_difference = 0;
+                double sum_difference = 0.0;
+                for (std::size_t i = 0; i < post_rgb.size(); ++i) {
+                    const int difference = std::abs(static_cast<int>(post_rgb[i]) -
+                                                    static_cast<int>(reference[i]));
+                    max_difference = std::max(max_difference, difference);
+                    sum_difference += difference;
+                }
+                const double mean_difference =
+                    sum_difference / static_cast<double>(post_rgb.size());
+                std::printf("[smoke] post 一致性（GPU vs CPU 同式 ACES/曝光/sRGB）："
+                            "最大差=%d/255  平均差=%.3f/255\n",
+                            max_difference, mean_difference);
+                // 容差 3/255：GPU 用 FP16 中间值 + 逐点浮点次序不同，8 位量化后允许 ±1~2 的抖动
+                if (max_difference > 3) {
+                    std::fprintf(stderr, "[smoke] ⚠️ 后处理与 CPU 参考偏差过大（> 3/255）\n");
+                }
+            } else {
+                std::fprintf(stderr, "[smoke] post 尺寸不匹配（%zu vs %zu），跳过对照\n",
+                             post_rgb.size(), reference.size());
+            }
+        }
+    }
+
     // 4) 与 golden 差分（§6.2：逐通道 NMSE 取最大）
     ehe::core::HdrImageF golden;
     if (!ehe::core::read_pfm(options.golden_path, golden)) {
@@ -322,6 +373,14 @@ int run_smoke(const Options& options) {
                 options.nmse_threshold, stats.nmse_rgb[0], stats.nmse_rgb[1], stats.nmse_rgb[2]);
     std::printf("[smoke] 最大绝对差=%.6e  平均绝对差=%.6e\n", stats.max_abs_diff,
                 stats.mean_abs_diff);
+    if (std::abs(config.render.res_scale - 1.0) > 1e-6) {
+        // golden 基线定义在 res_scale = 1.0（§6.1）；SSAA/升频是对同一场景的**不同采样**，
+        // 与 1.0× 基线本就不同（实测 SSAA 2.0x ≈ 2.5e-3、升频 0.5x ≈ 2.6e-3），
+        // 因此此时的 NMSE 只作参考量，不构成"实现错误"。
+        std::printf("[smoke] 注意：res_scale=%.2f ≠ 1.0，golden 基线定义在 1.0×，"
+                    "此处 NMSE 仅作参考（非实现正确性判据）\n",
+                    config.render.res_scale);
+    }
 
     if (stats.nmse <= options.nmse_threshold) {
         std::printf("[smoke] 通过\n");
@@ -400,6 +459,33 @@ void draw_panel(const Options& options, ehe::core::Camera& camera, ehe::render::
     ImGui::Checkbox("动画（time 随时间推进）", &animation);
     ImGui::TextDisabled("图案按 Ω(r)=r^-3/2 差速旋转（内快外慢）；0 = 关闭（golden 基线用 0）");
     ImGui::Text("t = %.2f s", animation_time);
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("后处理（§4.6）");
+    const char* scale_items[] = {"0.5x", "0.67x", "0.75x", "1.0x（原生）", "1.25x", "1.5x", "2.0x"};
+    const double scale_values[] = {0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0};
+    int scale_index = 3;
+    for (int i = 0; i < 7; ++i) {
+        if (std::abs(config.render.res_scale - scale_values[i]) < 1e-6) {
+            scale_index = i;
+            break;
+        }
+    }
+    if (ImGui::Combo("内部分辨率", &scale_index, scale_items, 7)) {
+        config.render.res_scale = scale_values[scale_index];
+    }
+    ImGui::TextDisabled(">1.0 = SSAA 降采样；<1.0 = 升频（FSR1 见 T1.5.2，当前 Catmull-Rom）");
+    ImGui::Checkbox("FXAA（色调映射前）", &config.render.fxaa);
+    ImGui::SameLine();
+    ImGui::Checkbox("ACES", &config.post.aces);
+    float exposure = static_cast<float>(config.post.exposure);
+    if (ImGui::SliderFloat("曝光", &exposure, 0.05F, 4.0F, "%.2f")) {
+        config.post.exposure = static_cast<double>(exposure);
+    }
+    float chroma_ab = static_cast<float>(config.post.chrom_ab);
+    if (ImGui::SliderFloat("色差", &chroma_ab, 0.0F, 1.0F, "%.2f")) {
+        config.post.chrom_ab = static_cast<double>(chroma_ab);
+    }
 
     ImGui::Separator();
     ImGui::TextUnformatted("相机（§4.7）");

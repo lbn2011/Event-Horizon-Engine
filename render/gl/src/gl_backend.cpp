@@ -172,6 +172,37 @@ public:
 
     const std::string& last_error() const override { return last_error_; }
 
+    bool capture_ldr(std::vector<unsigned char>& rgb, int& width, int& height) override {
+        if (!pipeline_ready_ || width_ <= 0 || height_ <= 0) {
+            return false;
+        }
+        // 重跑完整链（raymarch → resolve → fxaa → final）后回读**最终 LDR 目标**（输出分辨率）。
+        // 为什么不读默认帧缓冲：窗口尺寸可能被系统放大（离屏冒烟实测 32x32 → 120x32），
+        // 那样抓到的成品尺寸与渲染尺寸不一致，无法与 CPU 参考逐像素对照。
+        draw_frame();
+
+        width = output_width_;
+        height = output_height_;
+        rgb.assign(static_cast<std::size_t>(3) * width * height, 0);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, final_fbo_);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, rgb.data());
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+
+        // glReadPixels 自下而上；core 约定第 0 行 = 顶部 → 逐行翻转
+        const std::size_t row_bytes = static_cast<std::size_t>(3) * width;
+        std::vector<unsigned char> flipped(rgb.size());
+        for (int y = 0; y < height; ++y) {
+            const unsigned char* source =
+                rgb.data() + static_cast<std::size_t>(height - 1 - y) * row_bytes;
+            std::copy(source, source + row_bytes,
+                      flipped.data() + static_cast<std::size_t>(y) * row_bytes);
+        }
+        rgb.swap(flipped);
+        return true;
+    }
+
     void finish() override {
         if (window_ != nullptr) {
             glFinish();  // 仅探测/冒烟路径调用（DESIGN §5.4.1）
@@ -264,14 +295,17 @@ public:
         if (!pipeline_ready_ || fbo_ == 0 || internal_width_ <= 0 || internal_height_ <= 0) {
             return false;
         }
-        width = internal_width_;
-        height = internal_height_;
+        width = output_width_;
+        height = output_height_;
         rgb.assign(static_cast<std::size_t>(3) * width * height, 0.0F);
 
-        // 以当前参数重绘一帧，保证读到的是最新结果（smoke 模式取末帧）
-        draw_raymarch_to_fbo();
+        // 以当前参数重绘：raymarch + 分辨率变换 → **输出分辨率的 HDR**（与 draw_frame 同一路径）。
+        // 语义：PFM 差分基准是"分辨率变换之后、色调映射/FXAA 之前"的 HDR（§6.1「无后处理」），
+        // 这样 res_scale != 1.0 时也能与 golden 直接可比（res_scale==1 时与内部缓冲逐位相同）。
+        const GLuint source_texture = render_hdr_output();
+        const bool resolved = (source_texture == post_texture_[0]);
 
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, resolved ? post_fbo_[0] : fbo_);
         glReadBuffer(GL_COLOR_ATTACHMENT0);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadPixels(0, 0, width, height, GL_RGB, GL_FLOAT, rgb.data());
@@ -428,8 +462,11 @@ private:
         last_error_.clear();
 
         const std::string root = resolve_shader_root();
+        // 四个 pass（§4.6 链序）：raymarch → resolve（分辨率变换）→ fxaa → final（ACES+曝光+色差）
         if (!compile_program("fullscreen.vert", "raymarch.frag", raymarch_program_, root) ||
-            !compile_program("fullscreen.vert", "present.frag", present_program_, root)) {
+            !compile_program("fullscreen.vert", "post_resolve.frag", resolve_program_, root) ||
+            !compile_program("fullscreen.vert", "post_fxaa.frag", fxaa_program_, root) ||
+            !compile_program("fullscreen.vert", "post_final.frag", final_program_, root)) {
             std::fprintf(stderr, "[gl] 管线构建失败：%s\n", last_error_.c_str());
             return;
         }
@@ -448,8 +485,24 @@ private:
         glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo_);  // §5.4.1：GL 用 binding 0
         glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
+        // resolve 与 final 各自的小 UBO（binding 3 / 4，见对应 shader 的声明）
+        glGenBuffers(1, &post_ubo_);
+        glBindBuffer(GL_UNIFORM_BUFFER, post_ubo_);
+        glBufferData(GL_UNIFORM_BUFFER, static_cast<GLsizeiptr>(sizeof(PostParams)), nullptr,
+                     GL_DYNAMIC_DRAW);
+        glBindBufferBase(GL_UNIFORM_BUFFER, 3, post_ubo_);
+        glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+        glGenBuffers(1, &final_ubo_);
+        glBindBuffer(GL_UNIFORM_BUFFER, final_ubo_);
+        glBufferData(GL_UNIFORM_BUFFER, static_cast<GLsizeiptr>(sizeof(FinalParams)), nullptr,
+                     GL_DYNAMIC_DRAW);
+        glBindBufferBase(GL_UNIFORM_BUFFER, 4, final_ubo_);
+        glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
         pipeline_ready_ = true;
-        std::printf("[gl] raymarch 管线就绪（UBO %zu 字节）\n", sizeof(SimParams));
+        std::printf("[gl] 后处理管线就绪：raymarch → resolve → fxaa → final（UBO %zu 字节）\n",
+                    sizeof(SimParams));
     }
 
     void destroy_pipeline() {
@@ -461,6 +514,25 @@ private:
             glDeleteTextures(1, &color_texture_);
             color_texture_ = 0;
         }
+        // 后处理中间目标（输出分辨率 ×2）
+        for (int i = 0; i < 2; ++i) {
+            if (post_fbo_[i] != 0) {
+                glDeleteFramebuffers(1, &post_fbo_[i]);
+                post_fbo_[i] = 0;
+            }
+            if (post_texture_[i] != 0) {
+                glDeleteTextures(1, &post_texture_[i]);
+                post_texture_[i] = 0;
+            }
+        }
+        if (final_fbo_ != 0) {
+            glDeleteFramebuffers(1, &final_fbo_);
+            final_fbo_ = 0;
+        }
+        if (final_texture_ != 0) {
+            glDeleteTextures(1, &final_texture_);
+            final_texture_ = 0;
+        }
         if (lut_texture_ != 0) {
             glDeleteTextures(1, &lut_texture_);
             lut_texture_ = 0;
@@ -468,6 +540,14 @@ private:
         if (ubo_ != 0) {
             glDeleteBuffers(1, &ubo_);
             ubo_ = 0;
+        }
+        if (post_ubo_ != 0) {
+            glDeleteBuffers(1, &post_ubo_);
+            post_ubo_ = 0;
+        }
+        if (final_ubo_ != 0) {
+            glDeleteBuffers(1, &final_ubo_);
+            final_ubo_ = 0;
         }
         if (vao_ != 0) {
             glDeleteVertexArrays(1, &vao_);
@@ -477,16 +557,26 @@ private:
             glDeleteProgram(raymarch_program_);
             raymarch_program_ = 0;
         }
-        if (present_program_ != 0) {
-            glDeleteProgram(present_program_);
-            present_program_ = 0;
+        if (resolve_program_ != 0) {
+            glDeleteProgram(resolve_program_);
+            resolve_program_ = 0;
+        }
+        if (fxaa_program_ != 0) {
+            glDeleteProgram(fxaa_program_);
+            fxaa_program_ = 0;
+        }
+        if (final_program_ != 0) {
+            glDeleteProgram(final_program_);
+            final_program_ = 0;
         }
         internal_width_ = 0;
         internal_height_ = 0;
+        output_width_ = 0;
+        output_height_ = 0;
         pipeline_ready_ = false;
     }
 
-    /// 按 res_scale 计算内部分辨率并（必要时）重建 FP16 目标
+    /// 按 res_scale 计算内部分辨率与输出分辨率，并（必要时）重建 FP16 目标
     void ensure_targets() {
         if (!pipeline_ready_) {
             return;
@@ -498,39 +588,87 @@ private:
         const int base_h = (render_height_ > 0) ? render_height_ : height_;
         const int want_w = std::max(1, static_cast<int>(std::lround(base_w * scale)));
         const int want_h = std::max(1, static_cast<int>(std::lround(base_h * scale)));
-        if (want_w == internal_width_ && want_h == internal_height_ && fbo_ != 0) {
+        if (want_w == internal_width_ && want_h == internal_height_ && base_w == output_width_ &&
+            base_h == output_height_ && fbo_ != 0 && post_fbo_[0] != 0 && final_fbo_ != 0) {
             return;
         }
 
-        if (fbo_ == 0) {
-            glGenFramebuffers(1, &fbo_);
-        }
-        if (color_texture_ == 0) {
-            glGenTextures(1, &color_texture_);
-        }
+        auto create_target = [](GLuint& fbo, GLuint& texture, int w, int h) {
+            if (fbo == 0) {
+                glGenFramebuffers(1, &fbo);
+            }
+            if (texture == 0) {
+                glGenTextures(1, &texture);
+            }
+            glBindTexture(GL_TEXTURE_2D, texture);
+            // §5.4.1：GL 侧 HDR 颜色 = GL_RGBA16F
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+            const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            return status;
+        };
 
-        glBindTexture(GL_TEXTURE_2D, color_texture_);
-        // §5.4.1：GL 侧 HDR 颜色 = GL_RGBA16F
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, want_w, want_h, 0, GL_RGBA, GL_FLOAT, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glBindTexture(GL_TEXTURE_2D, 0);
-
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_texture_, 0);
-        const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        const GLenum status = create_target(fbo_, color_texture_, want_w, want_h);
         if (status != GL_FRAMEBUFFER_COMPLETE) {
             last_error_ = "FP16 FBO 不完整（status=0x" + std::to_string(status) + "）";
             std::fprintf(stderr, "[gl] %s\n", last_error_.c_str());
             pipeline_ready_ = false;
             return;
         }
+        // 后处理中间目标固定在**输出分辨率**（SSAA 降采样/升频的结果尺寸）
+        for (int i = 0; i < 2; ++i) {
+            const GLenum post_status =
+                create_target(post_fbo_[i], post_texture_[i], base_w, base_h);
+            if (post_status != GL_FRAMEBUFFER_COMPLETE) {
+                last_error_ = "后处理 FBO 不完整（status=0x" + std::to_string(post_status) + "）";
+                std::fprintf(stderr, "[gl] %s\n", last_error_.c_str());
+                pipeline_ready_ = false;
+                return;
+            }
+        }
+
+        // 最终 LDR 目标（RGBA8）：后处理链写这里，再 blit 到默认帧缓冲显示。
+        // 这样"后处理输出的尺寸 = 输出分辨率"与窗口尺寸解耦——
+        // 离屏冒烟时窗口会被系统拉大（实测 32×32 → 120×32），若直接写默认帧缓冲就抓不到正确尺寸的成品。
+        {
+            if (final_fbo_ == 0) {
+                glGenFramebuffers(1, &final_fbo_);
+            }
+            if (final_texture_ == 0) {
+                glGenTextures(1, &final_texture_);
+            }
+            glBindTexture(GL_TEXTURE_2D, final_texture_);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, base_w, base_h, 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, nullptr);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glBindFramebuffer(GL_FRAMEBUFFER, final_fbo_);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                                   final_texture_, 0);
+            const GLenum final_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            if (final_status != GL_FRAMEBUFFER_COMPLETE) {
+                last_error_ = "最终 LDR FBO 不完整（status=0x" + std::to_string(final_status) + "）";
+                std::fprintf(stderr, "[gl] %s\n", last_error_.c_str());
+                pipeline_ready_ = false;
+                return;
+            }
+        }
 
         internal_width_ = want_w;
         internal_height_ = want_h;
+        output_width_ = base_w;
+        output_height_ = base_h;
     }
 
     /// raymarch pass → FP16 FBO（HDR 原始输出，不做色调映射）
@@ -556,23 +694,102 @@ private:
         glUseProgram(0);
     }
 
-    /// 完整一帧：raymarch → FBO，再经呈现 pass 送到默认帧缓冲
-    void draw_frame() {
-        ensure_targets();
-        if (!pipeline_ready_) {
-            return;
-        }
+    /// raymarch + （必要时）分辨率变换 → **输出分辨率的 HDR**。
+    /// capture_hdr（差分基准）与 draw_frame（继续 FXAA/final）共用此路径，保证两者看到同一张图。
+    /// @return 源纹理（res_scale==1 时为 color_texture_ 本身，否则为 post_texture_[0]）
+    GLuint render_hdr_output() {
         draw_raymarch_to_fbo();
 
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glViewport(0, 0, width_, height_);
-        glUseProgram(present_program_);
+        const float res_scale = unpack_float(params_.flags[1]);
+        const bool ssaa = res_scale > 1.001F;     // >1.0 → SSAA 降采样
+        const bool upscale = res_scale < 0.999F;  // <1.0 → 升频（FSR1 落地前走 Catmull-Rom）
+        if (!ssaa && !upscale) {
+            return color_texture_;  // 原生分辨率：省一次全屏读写
+        }
+
+        PostParams post{};
+        post.mode_and_src[0] = ssaa ? 0 : 1;  // MODE_BOX / MODE_UP
+        post.mode_and_src[1] = internal_width_;
+        post.mode_and_src[2] = internal_height_;
+        post.mode_and_src[3] = 1;
+        post.dst_size[0] = output_width_;
+        post.dst_size[1] = output_height_;
+
+        glBindFramebuffer(GL_FRAMEBUFFER, post_fbo_[0]);
+        glViewport(0, 0, output_width_, output_height_);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_BLEND);
+        glBindBuffer(GL_UNIFORM_BUFFER, post_ubo_);
+        glBufferSubData(GL_UNIFORM_BUFFER, 0, static_cast<GLsizeiptr>(sizeof(PostParams)), &post);
+        glBindBuffer(GL_UNIFORM_BUFFER, 0);
+        glUseProgram(resolve_program_);
         glActiveTexture(GL_TEXTURE2);
         glBindTexture(GL_TEXTURE_2D, color_texture_);
         glBindVertexArray(vao_);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         glBindVertexArray(0);
         glUseProgram(0);
+        return post_texture_[0];
+    }
+
+    /// 完整一帧（§4.6 链序）：raymarch → 分辨率变换 → FXAA → final（ACES+曝光+色差）→ 呈现
+    void draw_frame() {
+        ensure_targets();
+        if (!pipeline_ready_) {
+            return;
+        }
+        GLuint source_texture = render_hdr_output();
+
+        const bool fxaa = (params_.flags[0] & kFlagFxaa) != 0U;
+        const bool aces = (params_.flags[0] & kFlagAces) != 0U;
+
+        // ---- pass 3：FXAA（在色调映射之前，§4.6；输入仍是 HDR 线性）----
+        if (fxaa) {
+            // 目标必须与源不同：源可能是 post_texture_[0]（做过分辨率变换）或 color_texture_
+            const GLuint fxaa_target_fbo =
+                (source_texture == post_texture_[0]) ? post_fbo_[1] : post_fbo_[0];
+            const GLuint fxaa_target_texture =
+                (source_texture == post_texture_[0]) ? post_texture_[1] : post_texture_[0];
+
+            glBindFramebuffer(GL_FRAMEBUFFER, fxaa_target_fbo);
+            glViewport(0, 0, output_width_, output_height_);
+            glUseProgram(fxaa_program_);
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, source_texture);
+            glBindVertexArray(vao_);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glBindVertexArray(0);
+            glUseProgram(0);
+
+            source_texture = fxaa_target_texture;
+        }
+
+        // ---- pass 4：final（曝光 → ACES → 色差 → sRGB）→ 输出分辨率的 LDR 目标 ----
+        FinalParams final_params{};
+        final_params.exposure_and_chroma[0] = params_.disk[2];  // exposure
+        final_params.exposure_and_chroma[1] = params_.disk[3];  // chroma_ab
+        final_params.flags[0] = aces ? 1.0F : 0.0F;
+
+        glBindFramebuffer(GL_FRAMEBUFFER, final_fbo_);
+        glViewport(0, 0, output_width_, output_height_);
+        glBindBuffer(GL_UNIFORM_BUFFER, final_ubo_);
+        glBufferSubData(GL_UNIFORM_BUFFER, 0, static_cast<GLsizeiptr>(sizeof(FinalParams)),
+                        &final_params);
+        glBindBuffer(GL_UNIFORM_BUFFER, 0);
+        glUseProgram(final_program_);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, source_texture);
+        glBindVertexArray(vao_);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glBindVertexArray(0);
+        glUseProgram(0);
+
+        // ---- 呈现：把 LDR 目标 blit 到默认帧缓冲（窗口尺寸可能不同于输出尺寸，用线性缩放）----
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, final_fbo_);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        glBlitFramebuffer(0, 0, output_width_, output_height_, 0, 0, width_, height_,
+                          GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 
     // ---------------------------------------------------------------- 成员
@@ -582,14 +799,24 @@ private:
     int height_ = 0;
 
     GLuint raymarch_program_ = 0;
-    GLuint present_program_ = 0;
+    GLuint resolve_program_ = 0;
+    GLuint fxaa_program_ = 0;
+    GLuint final_program_ = 0;
     GLuint vao_ = 0;
     GLuint ubo_ = 0;
+    GLuint post_ubo_ = 0;
+    GLuint final_ubo_ = 0;
     GLuint fbo_ = 0;
     GLuint color_texture_ = 0;
+    GLuint post_fbo_[2] = {0, 0};
+    GLuint post_texture_[2] = {0, 0};
+    GLuint final_fbo_ = 0;
+    GLuint final_texture_ = 0;
     GLuint lut_texture_ = 0;
     int internal_width_ = 0;
     int internal_height_ = 0;
+    int output_width_ = 0;
+    int output_height_ = 0;
 
     SimParams params_{};
     std::string shader_root_;

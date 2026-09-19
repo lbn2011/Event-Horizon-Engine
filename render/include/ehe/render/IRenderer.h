@@ -102,6 +102,12 @@ public:
     /// 等待 GPU 完成（GL: glFinish；VK: queue wait idle）。
     /// 用途：**仅冒烟/能力探测**需要真实帧耗时（DESIGN §5.4.1：正常路径靠 vsync，不主动同步）。
     virtual void finish() = 0;
+
+    /// 读取**后处理链之后**的 8 位输出（默认帧缓冲，不含 ImGui 合成）。
+    /// 用途：验证后处理（ACES/曝光/色差/编码）的 GPU 结果与 `core/tonemap.cpp` 的 CPU 参考一致——
+    /// 这是后处理链唯一的数值验证途径（它作用在 golden 之前，不进 NMSE 差分，§6.1）。
+    /// @param rgb 输出缓冲（3 × width × height，8 位，**第 0 行 = 图像顶部**）
+    virtual bool capture_ldr(std::vector<unsigned char>& rgb, int& width, int& height) = 0;
 };
 
 }  // namespace ehe::render

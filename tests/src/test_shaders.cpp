@@ -6,7 +6,7 @@
 //
 // 覆盖：
 //   - include 展开链路（render/ShaderSource，§5.8）
-//   - fullscreen.vert / raymarch.frag / present.frag 的 GLSL 450 解析（OpenGL 客户端语义）
+//   - fullscreen.vert / raymarch.frag / post_{resolve,fxaa,final}.frag 的 GLSL 450 解析（OpenGL 客户端语义）
 //   - UBO 布局一致性：shader 声明的 std140 块必须能被 C++ 侧 sizeof(SimParams) 校验通过
 
 #include <doctest/doctest.h>
@@ -83,7 +83,7 @@ TEST_CASE("shader_source: include 展开（§5.8）与循环检测") {
     CHECK(cyclic.error.find("无法解析 include") != std::string::npos);
 }
 
-TEST_CASE("shader: raymarch.frag / fullscreen.vert / present.frag 通过 glslang 解析") {
+TEST_CASE("shader: raymarch.frag / fullscreen.vert / post_*.frag 通过 glslang 解析") {
     const std::string root = find_shader_root();
     REQUIRE_FALSE(root.empty());
 
@@ -92,15 +92,26 @@ TEST_CASE("shader: raymarch.frag / fullscreen.vert / present.frag 通过 glslang
     const std::vector<std::string> roots = {root, "shaders"};
     const ehe::render::ShaderLoadResult vert = ehe::render::load_shader(root + "/fullscreen.vert", roots);
     const ehe::render::ShaderLoadResult frag = ehe::render::load_shader(root + "/raymarch.frag", roots);
-    const ehe::render::ShaderLoadResult present = ehe::render::load_shader(root + "/present.frag", roots);
+    // 后处理链三个 pass（§4.6）：分辨率变换 / FXAA / 最终合成
+    const ehe::render::ShaderLoadResult resolve =
+        ehe::render::load_shader(root + "/post_resolve.frag", roots);
+    const ehe::render::ShaderLoadResult fxaa =
+        ehe::render::load_shader(root + "/post_fxaa.frag", roots);
+    const ehe::render::ShaderLoadResult final_pass =
+        ehe::render::load_shader(root + "/post_final.frag", roots);
     REQUIRE(vert.ok);
     REQUIRE(frag.ok);
-    REQUIRE(present.ok);
+    REQUIRE(resolve.ok);
+    REQUIRE(fxaa.ok);
+    REQUIRE(final_pass.ok);
 
     const ParseResult vert_result = parse_glsl(vert.source.text, EShLangVertex, "fullscreen.vert");
     const ParseResult frag_result = parse_glsl(frag.source.text, EShLangFragment, "raymarch.frag");
-    const ParseResult present_result =
-        parse_glsl(present.source.text, EShLangFragment, "present.frag");
+    const ParseResult resolve_result =
+        parse_glsl(resolve.source.text, EShLangFragment, "post_resolve.frag");
+    const ParseResult fxaa_result = parse_glsl(fxaa.source.text, EShLangFragment, "post_fxaa.frag");
+    const ParseResult final_result =
+        parse_glsl(final_pass.source.text, EShLangFragment, "post_final.frag");
 
     glslang::FinalizeProcess();
 
@@ -111,13 +122,21 @@ TEST_CASE("shader: raymarch.frag / fullscreen.vert / present.frag 通过 glslang
     if (!vert_result.parsed) {
         std::fprintf(stderr, "[shader-test] fullscreen.vert 解析失败：\n%s\n", vert_result.log.c_str());
     }
-    if (!present_result.parsed) {
-        std::fprintf(stderr, "[shader-test] present.frag 解析失败：\n%s\n", present_result.log.c_str());
+    if (!resolve_result.parsed) {
+        std::fprintf(stderr, "[shader-test] post_resolve.frag 解析失败：\n%s\n", resolve_result.log.c_str());
+    }
+    if (!fxaa_result.parsed) {
+        std::fprintf(stderr, "[shader-test] post_fxaa.frag 解析失败：\n%s\n", fxaa_result.log.c_str());
+    }
+    if (!final_result.parsed) {
+        std::fprintf(stderr, "[shader-test] post_final.frag 解析失败：\n%s\n", final_result.log.c_str());
     }
 
     CHECK(vert_result.parsed);
     CHECK(frag_result.parsed);
-    CHECK(present_result.parsed);
+    CHECK(resolve_result.parsed);
+    CHECK(fxaa_result.parsed);
+    CHECK(final_result.parsed);
 }
 
 TEST_CASE("shader: glslang 对 fp64 内建函数的支持探测（环境自检）") {

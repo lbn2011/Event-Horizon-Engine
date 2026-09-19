@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 
+#include "ehe/core/tonemap.h"  // 预览用 ACES（与 shaders/post_final.frag 同式，V5.9）
 #include "ehe/core/units.h"
 
 namespace ehe::core {
@@ -247,16 +248,28 @@ HdrImage render_golden(const GoldenParams& params, RenderStats* stats) {
     return image;
 }
 
-std::vector<std::uint8_t> tonemap_to_srgb8(const HdrImage& image, double exposure) {
+std::vector<std::uint8_t> tonemap_to_srgb8(const HdrImage& image, double exposure, bool aces) {
     std::vector<std::uint8_t> bytes(static_cast<std::size_t>(image.width) * image.height * 3, 0);
-    for (std::size_t i = 0; i < image.pixels.size(); ++i) {
-        // 预览用色调映射：曝光 → Reinhard（x/(1+x)，保留高光层次、避免硬削顶）→ sRGB 传输函数。
-        // 注意：PFM 基线输出的是**线性 HDR 原值**，不经此处处理（DESIGN §6.3）。
-        const double linear = std::max(0.0, static_cast<double>(image.pixels[i]) * exposure);
-        const double mapped = linear / (1.0 + linear);
-        const double srgb = (mapped <= 0.0031308) ? (12.92 * mapped)
-                                                  : (1.055 * std::pow(mapped, 1.0 / 2.4) - 0.055);
-        bytes[i] = static_cast<std::uint8_t>(std::lround(clamp_d(srgb, 0.0, 1.0) * 255.0));
+    // 预览用色调映射：曝光 → ACES（Hill 拟合，与 shaders/post_final.frag 同式）→ sRGB 传输函数。
+    // ACES 是**三通道联合**运算（输入/输出矩阵），故按像素（RGB 三元组）处理，不能逐标量走。
+    // aces=false 时退化为 Reinhard（仅作对照）；PFM 基线始终是线性 HDR 原值（§6.3）。
+    const std::size_t pixel_count = image.pixels.size() / 3;
+    for (std::size_t p = 0; p < pixel_count; ++p) {
+        const Vec3 hdr{static_cast<double>(image.pixels[p * 3 + 0]) * exposure,
+                       static_cast<double>(image.pixels[p * 3 + 1]) * exposure,
+                       static_cast<double>(image.pixels[p * 3 + 2]) * exposure};
+        Vec3 mapped;
+        if (aces) {
+            mapped = aces_fitted(hdr);
+        } else {
+            mapped = Vec3{hdr.x / (1.0 + hdr.x), hdr.y / (1.0 + hdr.y), hdr.z / (1.0 + hdr.z)};
+        }
+        bytes[p * 3 + 0] = static_cast<std::uint8_t>(
+            std::lround(clamp_d(linear_to_srgb(mapped.x), 0.0, 1.0) * 255.0));
+        bytes[p * 3 + 1] = static_cast<std::uint8_t>(
+            std::lround(clamp_d(linear_to_srgb(mapped.y), 0.0, 1.0) * 255.0));
+        bytes[p * 3 + 2] = static_cast<std::uint8_t>(
+            std::lround(clamp_d(linear_to_srgb(mapped.z), 0.0, 1.0) * 255.0));
     }
     return bytes;
 }

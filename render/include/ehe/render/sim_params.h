@@ -78,6 +78,22 @@ float unpack_float(std::uint32_t bits);
 SimParams make_sim_params(const core::Config& config, const core::Camera& camera,
                           const core::Vec3& camera_forward, double aspect, double time);
 
+// ---------------------------------------------------------------- 后处理 UBO（§4.6）
+
+/// 分辨率变换 pass 的参数（`shaders/post_resolve.frag`，std140 binding = 3）
+struct PostParams {
+    std::int32_t mode_and_src[4] = {0, 0, 0, 1};  ///< x = mode(0 box/1 up/2 copy), y = src_w, z = src_h, w = 保留
+    std::int32_t dst_size[4] = {0, 0, 0, 0};      ///< x = dst_w, y = dst_h
+};
+static_assert(sizeof(PostParams) == 32, "PostParams 必须是 2 个 std140 ivec4（32 字节）");
+
+/// 最终合成 pass 的参数（`shaders/post_final.frag`，std140 binding = 4）
+struct FinalParams {
+    float exposure_and_chroma[4] = {1.0F, 0.0F, 0.0F, 0.0F};  ///< x = 曝光, y = 色差强度
+    float flags[4] = {1.0F, 0.0F, 0.0F, 0.0F};               ///< x = 1 启用 ACES
+};
+static_assert(sizeof(FinalParams) == 32, "FinalParams 必须是 2 个 std140 vec4（32 字节）");
+
 /// 设置 flags 中的某一位
 void set_flag(SimParams& params, std::uint32_t flag, bool enabled);
 bool has_flag(const SimParams& params, std::uint32_t flag);

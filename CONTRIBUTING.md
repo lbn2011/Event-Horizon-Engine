@@ -114,9 +114,12 @@ python -m venv <venv> && <venv>/Scripts/pip install glad
    `git fetch mirror "+refs/heads/main:refs/remotes/mirror/main"`。
 3. **GitHub API 直连**（`gh api` 通常不受影响）：必要时用 Git Data API 造提交。**必须按下列顺序，缺一不可**：
    1. 对 `git ls-tree -r HEAD` 的每个条目检查 blob 是否存在于服务端（`GET /git/blobs/<sha>`），
-      **缺失的先补传**（否则建树会因引用不存在的对象而失败）；
+      **缺失的先补传**；补传内容**必须取 git 对象库的字节**：
+      `git cat-file blob <sha>` 重定向到临时文件后上传——
+      **不要直接读工作树文件**：开启了 `core.autocrlf` 时工作树是 CRLF、而提交里存的是 LF，
+      两者 SHA 不同 → 建出的树与本地树对不上（已踩，表现为"树一致: False"）；
    2. 用**完整条目**（含 `mode`，注意 `100755` 等）`POST /git/trees`（**不要**用 `base_tree` 增量方式）；
-   3. **核对远端树 SHA 与本地 `git rev-parse HEAD^{tree}` 一致**——这是唯一能拦住「静默丢文件」的检查；
+   3. **核对远端树 SHA 与本地 `git rev-parse HEAD^{tree}` 一致**——这是唯一能拦住「静默丢文件 / 内容偏差」的检查；
    4. `POST /git/commits`（parent = 远端 tip）→ `PATCH /git/refs/heads/<branch>`；
    5. 本地用 `git fetch mirror` 取回远端提交，再 `git reset --hard <远端 sha>` 对齐。
 
