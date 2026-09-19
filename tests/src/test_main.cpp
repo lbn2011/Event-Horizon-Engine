@@ -11,7 +11,23 @@
 
 #include <string>
 
+#include "ehe/core/console.h"
 #include "ehe/core/version.h"
+
+#if defined(_WIN32)
+extern "C" __declspec(dllimport) unsigned int __stdcall GetConsoleOutputCP(void);
+#endif
+
+TEST_CASE("core: 控制台切到 UTF-8（中文 Windows 默认 GBK/936，不切换则所有中文输出乱码）") {
+    ehe::core::enable_utf8_console();
+#if defined(_WIN32)
+    // 只在有控制台附加时断言（重定向/CI 下 GetConsoleOutputCP 可能返回 0，此时跳过）
+    const unsigned int code_page = GetConsoleOutputCP();
+    if (code_page != 0) {
+        CHECK(code_page == 65001);  // CP_UTF8
+    }
+#endif
+}
 
 TEST_CASE("core: 版本与构建开关可查询") {
     const std::string version = ehe::core::version_string();
