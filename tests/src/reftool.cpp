@@ -23,6 +23,7 @@
 
 #include "ehe/core/blackbody.h"
 #include "ehe/core/config.h"
+#include "ehe/core/console.h"
 #include "ehe/core/golden.h"
 #include "ehe/core/image_io.h"
 #include "ehe/core/integrator.h"
@@ -251,6 +252,7 @@ int run_png(int argc, char** argv) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    ehe::core::enable_utf8_console();  // 中文输出需 UTF-8 控制台（否则乱码）
     if (argc < 2) {
         std::printf("用法: ehe_reftool <lut|golden|compare|png> [参数...]\n");
         return 2;

@@ -31,6 +31,7 @@
 #include "backend_factory.h"
 #include "caps.h"
 #include "ehe/core/camera.h"
+#include "ehe/core/console.h"
 #include "ehe/core/config.h"
 #include "ehe/core/golden.h"
 #include "ehe/core/image_io.h"
@@ -664,6 +665,9 @@ int run_window(const Options& options) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // 先把控制台切到 UTF-8：本程序的字符串字面量是 UTF-8，而中文 Windows 控制台默认 GBK(936)
+    // —— 不切换的话所有中文输出都是乱码（与调用方式无关：双击、脚本调起都一样）
+    ehe::core::enable_utf8_console();
     // 无缓冲 stdout：图形路径崩溃时缓冲会丢，日志即现场（smoke/开发期定位必需）
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     const Options options = parse_args(argc, argv);
