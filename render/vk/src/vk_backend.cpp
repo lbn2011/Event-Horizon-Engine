@@ -63,6 +63,10 @@ public:
             return false;
         }
         vsync_ = cfg.vsync;
+        // 与 GL 后端同语义：config 里的 shader 根目录直接落地（app 后续的 set_shader_root 会覆盖）
+        if (!cfg.shader_root.empty()) {
+            shader_root_ = cfg.shader_root;
+        }
 
         if (volkInitialize() != VK_SUCCESS) {
             std::fprintf(stderr, "[vk] volk 初始化失败：系统缺少 vulkan-1.dll（未安装显卡驱动？）\n");
@@ -77,6 +81,14 @@ public:
         }
         if (!create_commands() || !create_sync_objects()) {
             return false;
+        }
+        // 建渲染链（raymarch + 后处理，T1.6.1）。与 GL 的 build_pipeline 同语义：
+        // 失败不致命（窗口与面板仍可用），错误经 last_error() 暴露给 UI。
+        // 宏规整在此处做（create_device 之后，shaderFloat64 已知）：
+        //   命令行/Config 的 defines（如 EHE_FP32_ONLY）必须参与规整，不能丢。
+        requested_defines_ = effective_shader_defines(cfg.shader_defines);
+        if (!create_chain()) {
+            std::fprintf(stderr, "[vk] 渲染链未就绪：%s\n", last_error_.c_str());
         }
         if (!init_imgui()) {
             return false;

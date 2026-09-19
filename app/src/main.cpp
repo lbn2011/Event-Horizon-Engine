@@ -514,9 +514,7 @@ void draw_panel(const Options& options, ehe::core::Camera& camera, ehe::render::
             target_backend = picked;
         }
     }
-    if (renderer.backend() == ehe::core::Backend::Vulkan) {
-        ImGui::TextDisabled("Vulkan 的 raymarch 管线在 T1.6 落地");
-    }
+    // 精度策略等能力信息经 --caps 查看；管线未就绪时上方红字会显示 last_error
     ImGui::TextDisabled("初始后端 %s / vsync=%d / 配置 %s", ehe::render::backend_name(options.backend),
                         options.vsync ? 1 : 0, options.config_path.c_str());
     ImGui::End();
@@ -647,8 +645,21 @@ int run_window(const Options& options) {
             }
             renderer = ehe::app::create_renderer(current_backend);
             if (renderer == nullptr || !renderer->init(cfg)) {
-                std::fprintf(stderr, "[main] 切换后端失败，程序退出\n");
-                return 1;
+                // 切换失败不退出（DESIGN §5.2）：回退到原后端继续跑，错误显示在面板上
+                std::fprintf(stderr, "[main] 切换到 %s 失败，回退到 %s\n",
+                             ehe::render::backend_name(current_backend),
+                             ehe::render::backend_name(options.backend));
+                current_backend = options.backend;
+                cfg.backend = current_backend;
+                if (last_width > 0 && last_height > 0) {
+                    cfg.width = last_width;
+                    cfg.height = last_height;
+                }
+                renderer = ehe::app::create_renderer(current_backend);
+                if (renderer == nullptr || !renderer->init(cfg)) {
+                    std::fprintf(stderr, "[main] 回退到初始后端仍失败，程序退出\n");
+                    return 1;
+                }
             }
             if (!options.shader_root.empty()) {
                 renderer->set_shader_root(options.shader_root);
