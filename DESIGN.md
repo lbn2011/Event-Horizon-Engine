@@ -1,4 +1,4 @@
-# Event Horizon Engine (EHE) — 开发文档 V5.14
+# Event Horizon Engine (EHE) — 开发文档 V5.15
 
 > **本文档是 EHE 项目开发的唯一权威依据。** 原始需求对话（`黑洞渲染模拟：Kerr度规光线....json`）仅为历史参考，
 > 凡本文档与对话冲突之处，以本文档为准。本文档不含代码；修改本文档需明确提出并递增版本号。
@@ -120,6 +120,29 @@
 >   ④ **messenger 须在 vkDestroyInstance 前销毁**（VUID-vkDestroyInstance-instance-00629）。
 >   另：GL 侧 512×512 抹烟本轮 NMSE=1.000（输出全 0 的特征值；疑 TDR——单帧 3423ms > Win10 默认
 >   TdrDelay 2s，同机当日早些时候 2516ms 实测达标 5.654e-04），待复跑确认，非代码缺陷。
+> V5.15（2026-09-19 真机四轮）：**VK 渲染尺寸与窗口解耦——final 画进离屏 LDR 目标，blit 呈现**。
+>   真机四轮日志：caps 全干净（验证层零报错，512 GL 复跑 NMSE=5.654e-04 通过，TDR 疑云解除），
+>   但 VK smoke 请求 32×32 却输出 180×32——Windows 把 32×32 窗口拉大到系统最小值（180×32），
+>   而 VK 侧 final 直接画进交换链（V5.11② 的偷懒），输出与回读全被窗口尺寸污染；且交换链图像
+>   无 TRANSFER_SRC 用途、PRESENT_SRC 布局不可作拷贝源（验证层两处报错皆源于此错误设计）。
+>   GL 侧早有同款教训并已修复（final_fbo + glBlitFramebuffer，gl_backend ensure_targets 注释
+>   写明 32×32→120×32），VK 侧照抄同构方案：
+>   ① `raymarch_chain` 新增离屏 LDR 图（请求分辨率、格式=交换链格式、COLOR_ATTACHMENT|TRANSFER_SRC、
+>      GENERAL 约定）+ 专用 ldr_pass；`record_final_in_pass`（画进调用方 pass）改为 `record_final`
+>      （自开 pass 画进 LDR 图）+ 末尾写后读屏障（COLOR_ATTACHMENT_WRITE→TRANSFER_READ）；
+>   ② 新增 `record_present`：UNDEFINED→TRANSFER_DST 屏障 → `vkCmdBlitImage` 线性拉伸
+>      （请求分辨率→窗口尺寸）→ TRANSFER_DST→COLOR_ATTACHMENT_OPTIMAL 屏障，交换链 pass 的
+>      finalLayout=PRESENT_SRC 接手最后过渡；
+>   ③ 后端 render pass 拆双份（clear 版=链未就绪降级 / load 版=blit 后叠 ImGui），附件格式相同
+>      framebuffer 共用；ImGui 管线挂 load 版；
+>   ④ `ChainInitInfo` 删 `swapchain_render_pass`、增 `swapchain_format`；`output_extent` 语义改为
+>      请求分辨率（来源=`RendererConfig.render_width/render_height`，0 跟随窗口——与 GL 同语义）；
+>   ⑤ `read_ldr` 去 VkImage 参数，从离屏 LDR 图读回（GENERAL 布局），BGRA/RGBA 按实际格式分支；
+>   ⑥ 链重建条件去掉"交换链尺寸变化"——链与窗口彻底解耦，窗口 resize 由 blit 拉伸吸收；
+>   ⑦ LUT 上传提交的首过渡扩为 5 张图（HDR×3 + LDR + LUT）。
+>   开发机验证：编译零警告通过；68 用例/41861 断言全过；GL smoke 32×32 NMSE=1.625e-04 与基线
+>   同量级、两次运行 PNG 字节级一致（GL 代码零改动）。
+>   附注：VK 性能计时需 `EHE_VK_VALIDATE=0`（验证层在绘制路径有可观开销，四轮日志 75.8ms 含之）。
 
 ---
 

@@ -85,6 +85,9 @@ public:
         if (!cfg.shader_root.empty()) {
             shader_root_ = cfg.shader_root;
         }
+        // 显式渲染尺寸优先（离屏 smoke 用）；0 = 跟随窗口（与 GL 的 render_width_/render_height_ 一致）
+        render_width_ = cfg.render_width;
+        render_height_ = cfg.render_height;
 
         if (volkInitialize() != VK_SUCCESS) {
             std::fprintf(stderr, "[vk] volk 初始化失败：系统缺少 vulkan-1.dll（未安装显卡驱动？）\n");
@@ -169,13 +172,13 @@ public:
     }
 
     void begin_frame() override {
-        // 交换链尺寸或 res_scale 变化 → 离屏目标尺寸随之变化，必须重建整条链（§5.4.1）
+        // res_scale 变化 → 离屏目标尺寸随之变化，必须重建整条链（§5.4.1）。
+        // 窗口/交换链尺寸**不再**触发链重建：渲染分辨率与窗口解耦后，链的离屏目标
+        // 只跟请求分辨率走，窗口变化由呈现期的 blit 拉伸吸收（与 GL 的 ensure_targets 同语义）。
         {
             const float res_scale = unpack_float(params_.flags[1]);
-            const bool extent_changed = (chain_extent_.width != swapchain_extent_.width ||
-                                        chain_extent_.height != swapchain_extent_.height);
             const bool scale_changed = (res_scale != chain_res_scale_);
-            if (chain_.ready() && (extent_changed || scale_changed) && device_ != VK_NULL_HANDLE) {
+            if (chain_.ready() && scale_changed && device_ != VK_NULL_HANDLE) {
                 vkDeviceWaitIdle(device_);
                 chain_.destroy();
                 create_chain();
@@ -297,14 +300,12 @@ public:
     }
 
     bool capture_ldr(std::vector<unsigned char>& rgb, int& width, int& height) override {
-        if (!chain_.ready() || swapchain_images_.empty()) {
+        if (!chain_.ready()) {
             last_error_ = "Vulkan 渲染链未就绪，无法回读 LDR";
             return false;
         }
-        // 从最近一帧呈现所用的交换链图像回读（final pass 直接画在那里）
-        const VkImage image = swapchain_images_[std::min<std::size_t>(image_index_,
-                                                                     swapchain_images_.size() - 1)];
-        return chain_.read_ldr(image, rgb, width, height);
+        // 从离屏 LDR 图回读（请求分辨率成品）；交换链图像只作呈现，不参与回读
+        return chain_.read_ldr(rgb, width, height);
     }
 
     /// 物理设备能力清单：T1.6 的实现选型依据（尤其 shaderFloat64 —— Intel 核显不原生支持，
@@ -748,44 +749,56 @@ private:
     }
 
     bool create_render_pass() {
-        VkAttachmentDescription color{};
-        color.format = swapchain_format_;
-        color.samples = VK_SAMPLE_COUNT_1_BIT;
-        color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;  // T1.3 起改为 LOAD + 场景先渲染
-        color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        color.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        // 双 render pass：附件格式/samples 相同 → 与同一组 framebuffer 兼容（loadOp 与
+        // initialLayout 不参与兼容性判定），framebuffer 无需成对创建。
+        //   clear 版：链未就绪的降级路径（清屏 + ImGui），图像 acquire 后从未写过 → initial=UNDEFINED
+        //   load 版：正常路径（blit 已把成品画上，只叠 ImGui）→ initial=COLOR_ATTACHMENT_OPTIMAL
+        auto make_pass = [this](VkImageLayout initial_layout, VkAttachmentLoadOp load_op,
+                                VkRenderPass& out) {
+            VkAttachmentDescription color{};
+            color.format = swapchain_format_;
+            color.samples = VK_SAMPLE_COUNT_1_BIT;
+            color.loadOp = load_op;
+            color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            color.initialLayout = initial_layout;
+            color.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
-        VkAttachmentReference color_ref{};
-        color_ref.attachment = 0;
-        color_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            VkAttachmentReference color_ref{};
+            color_ref.attachment = 0;
+            color_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-        VkSubpassDescription subpass{};
-        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount = 1;
-        subpass.pColorAttachments = &color_ref;
+            VkSubpassDescription subpass{};
+            subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+            subpass.colorAttachmentCount = 1;
+            subpass.pColorAttachments = &color_ref;
 
-        VkSubpassDependency dependency{};
-        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-        dependency.dstSubpass = 0;
-        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dependency.srcAccessMask = 0;
-        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            VkSubpassDependency dependency{};
+            dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+            dependency.dstSubpass = 0;
+            dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            dependency.srcAccessMask = 0;
+            dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
-        VkRenderPassCreateInfo info{};
-        info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        info.attachmentCount = 1;
-        info.pAttachments = &color;
-        info.subpassCount = 1;
-        info.pSubpasses = &subpass;
-        info.dependencyCount = 1;
-        info.pDependencies = &dependency;
-
-        if (vkCreateRenderPass(device_, &info, nullptr, &render_pass_) != VK_SUCCESS) {
-            std::fprintf(stderr, "[vk] 创建 render pass 失败\n");
+            VkRenderPassCreateInfo info{};
+            info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+            info.attachmentCount = 1;
+            info.pAttachments = &color;
+            info.subpassCount = 1;
+            info.pSubpasses = &subpass;
+            info.dependencyCount = 1;
+            info.pDependencies = &dependency;
+            return vkCreateRenderPass(device_, &info, nullptr, &out) == VK_SUCCESS;
+        };
+        if (!make_pass(VK_IMAGE_LAYOUT_UNDEFINED, VK_ATTACHMENT_LOAD_OP_CLEAR, render_pass_)) {
+            std::fprintf(stderr, "[vk] 创建 render pass（clear 版）失败\n");
+            return false;
+        }
+        if (!make_pass(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ATTACHMENT_LOAD_OP_LOAD,
+                       render_pass_load_)) {
+            std::fprintf(stderr, "[vk] 创建 render pass（load 版）失败\n");
             return false;
         }
         return true;
@@ -812,9 +825,18 @@ private:
 
     /// 创建渲染链（raymarch + 后处理，T1.6.1）。要求交换链与 render pass 已就绪。
     bool create_chain() {
-        if (device_ == VK_NULL_HANDLE || render_pass_ == VK_NULL_HANDLE ||
-            swapchain_extent_.width == 0 || swapchain_extent_.height == 0) {
-            last_error_ = "设备/交换链未就绪，无法创建渲染链";
+        if (device_ == VK_NULL_HANDLE || swapchain_format_ == VK_FORMAT_UNDEFINED) {
+            last_error_ = "设备未就绪，无法创建渲染链";
+            return false;
+        }
+        // 请求分辨率优先（离屏 smoke 用）；0 = 跟随交换链尺寸（与 GL 的 ensure_targets 同语义）
+        const std::uint32_t base_w =
+            (render_width_ > 0) ? static_cast<std::uint32_t>(render_width_) : swapchain_extent_.width;
+        const std::uint32_t base_h = (render_height_ > 0)
+                                         ? static_cast<std::uint32_t>(render_height_)
+                                         : swapchain_extent_.height;
+        if (base_w == 0 || base_h == 0) {
+            last_error_ = "请求分辨率与交换链尺寸均为 0，无法创建渲染链";
             return false;
         }
         const float res_scale = unpack_float(params_.flags[1]);
@@ -825,11 +847,11 @@ private:
         info.device = device_;
         info.queue = queue_;
         info.queue_family = queue_family_;
-        info.swapchain_render_pass = render_pass_;
-        info.output_extent = swapchain_extent_;
+        info.swapchain_format = swapchain_format_;  // 离屏 LDR 图同格式：blit 免转换
+        info.output_extent = {base_w, base_h};      // 请求分辨率（与窗口尺寸解耦）
         info.internal_extent = {
-            std::max(1U, static_cast<std::uint32_t>(std::lround(swapchain_extent_.width * scale))),
-            std::max(1U, static_cast<std::uint32_t>(std::lround(swapchain_extent_.height * scale)))};
+            std::max(1U, static_cast<std::uint32_t>(std::lround(base_w * scale))),
+            std::max(1U, static_cast<std::uint32_t>(std::lround(base_h * scale)))};
         info.shader_root = shader_root_.empty() ? std::string("shaders") : shader_root_;
         // 宏规整：恒含 EHE_VULKAN；设备不支持 fp64 时含 EHE_FP32_ONLY
         info.shader_defines = requested_defines_.empty() ? effective_shader_defines({})
@@ -841,8 +863,9 @@ private:
             std::fprintf(stderr, "[vk] 渲染链初始化失败：%s\n", last_error_.c_str());
             return false;
         }
-        chain_extent_ = swapchain_extent_;
         chain_res_scale_ = res_scale;
+        std::printf("[vk] 渲染链输出 %ux%u（请求分辨率），交换链 %ux%u（窗口）\n", base_w, base_h,
+                    swapchain_extent_.width, swapchain_extent_.height);
         return true;
     }
 
@@ -930,7 +953,7 @@ private:
         init.DescriptorPool = imgui_descriptor_pool_;
         init.MinImageCount = std::max(2U, static_cast<uint32_t>(swapchain_images_.size()));
         init.ImageCount = static_cast<uint32_t>(swapchain_images_.size());
-        init.PipelineInfoMain.RenderPass = render_pass_;
+        init.PipelineInfoMain.RenderPass = render_pass_load_;  // ImGui 画在 load 版（blit 之后）
         init.PipelineInfoMain.Subpass = 0;
         init.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
         init.CheckVkResultFn = check_vk;
@@ -963,7 +986,10 @@ private:
         const bool fxaa_enabled = (params_.flags[0] & kFlagFxaa) != 0U;
         const bool aces_enabled = (params_.flags[0] & kFlagAces) != 0U;
 
-        // ---- 离屏链（raymarch → 分辨率变换 → FXAA）必须在交换链 render pass **之前**录制 ----
+        // ---- 离屏链（raymarch → 分辨率变换 → FXAA → final）全部在交换链 pass 之前录制 ----
+        // final 画进离屏 LDR 图（请求分辨率），经 blit 线性拉伸呈现到交换链（窗口尺寸）——
+        // 渲染尺寸与窗口解耦，与 GL 的 final_fbo + glBlitFramebuffer 同构（§4.6）。
+        bool chain_drew = false;
         if (chain_.ready()) {
             FinalParams final_params{};
             final_params.exposure_and_chroma[0] = params_.disk[2];  // exposure
@@ -971,26 +997,25 @@ private:
             final_params.flags[0] = aces_enabled ? 1.0F : 0.0F;
             chain_.upload_uniforms(current_frame_, params_, final_params, res_scale);
             chain_.record_offscreen(cmd, current_frame_, params_, res_scale, fxaa_enabled);
+            chain_.record_final(cmd, current_frame_, aces_enabled);
+            chain_.record_present(cmd, swapchain_images_[image_index], swapchain_extent_);
+            chain_drew = true;
         }
 
+        // 链就绪 → load 版（blit 成果保留，只叠 ImGui）；链未就绪 → clear 版（清屏 + ImGui）
         VkClearValue clear{};
         clear.color = {{0.02F, 0.02F, 0.03F, 1.0F}};
 
         VkRenderPassBeginInfo pass{};
         pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        pass.renderPass = render_pass_;
+        pass.renderPass = chain_drew ? render_pass_load_ : render_pass_;
         pass.framebuffer = framebuffers_[image_index];
         pass.renderArea.offset = {0, 0};
         pass.renderArea.extent = swapchain_extent_;
         pass.clearValueCount = 1;
         pass.pClearValues = &clear;
         vkCmdBeginRenderPass(cmd, &pass, VK_SUBPASS_CONTENTS_INLINE);
-
-        // final pass（ACES/曝光/色差 → sRGB）画进交换链；ImGui 随后在同一 render pass 内叠加。
-        // 与 GL 后端的链序一致（§4.6），区别只是 VK 侧不需要额外的 blit pass。
-        if (chain_.ready()) {
-            chain_.record_final_in_pass(cmd, current_frame_, aces_enabled);
-        }
+        // ImGui 随后经 ImGui_ImplVulkan_RenderDrawData 在同一 render pass 内叠加（end_frame）
     }
 
     void recreate_swapchain() {
@@ -1028,6 +1053,10 @@ private:
         if (render_pass_ != VK_NULL_HANDLE) {
             vkDestroyRenderPass(device_, render_pass_, nullptr);
             render_pass_ = VK_NULL_HANDLE;
+        }
+        if (render_pass_load_ != VK_NULL_HANDLE) {
+            vkDestroyRenderPass(device_, render_pass_load_, nullptr);
+            render_pass_load_ = VK_NULL_HANDLE;
         }
         for (const VkImageView view : swapchain_views_) {
             if (view != VK_NULL_HANDLE) {
@@ -1098,12 +1127,12 @@ private:
     VkExtent2D swapchain_extent_{};
     std::vector<VkImage> swapchain_images_;
     std::vector<VkImageView> swapchain_views_;
-    VkRenderPass render_pass_ = VK_NULL_HANDLE;
+    VkRenderPass render_pass_ = VK_NULL_HANDLE;       ///< clear 版（链未就绪的降级路径）
+    VkRenderPass render_pass_load_ = VK_NULL_HANDLE;  ///< load 版（blit 成果保留，只叠 ImGui）
     std::vector<VkFramebuffer> framebuffers_;
 
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
-    RaymarchChain chain_;      ///< raymarch + 后处理链（T1.6.1）
-    VkExtent2D chain_extent_{};      ///< 建链时的交换链尺寸（变了要重建）
+    RaymarchChain chain_;            ///< raymarch + 后处理链（T1.6.1）
     float chain_res_scale_ = 1.0F;   ///< 建链时的 res_scale（变了要重建）
     FrameSync frames_[kFramesInFlight];
     uint32_t current_frame_ = 0;
@@ -1120,6 +1149,8 @@ private:
     int pending_height_ = 0;
     int width_ = 0;
     int height_ = 0;
+    int render_width_ = 0;   ///< 请求分辨率（RendererConfig；0 = 跟随窗口，与 GL 同语义）
+    int render_height_ = 0;
 };
 
 }  // namespace

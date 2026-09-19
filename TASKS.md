@@ -1,4 +1,4 @@
-# EHE 任务拆解 V1.17
+# EHE 任务拆解 V1.18
 
 > 执行清单，与 `DESIGN.md`（规格权威）配套使用。冲突时以 DESIGN.md 为准。
 > 每条任务：可勾选状态、验收标准、依赖、产出物。完成后勾 `[x]` 并注明日期。
@@ -8,6 +8,7 @@
 > → V1.12（T1.4 盘体湍流完成）→ V1.13（T1.5 后处理链完成）→ V1.14（T1.6.2 SPIR-V 编译落地 + CI 覆盖）
 > → V1.15（T1.6.3 后端切换收尾）→ V1.16（T1.6.4 二轮真机诊断：图像内存未绑定根因修复 + 验证层接入）
 > → V1.17（T1.6.4 三轮真机验证：VK 建链成功 + 验证层 4 处合规问题修复）。
+> → V1.18（T1.6.4 四轮：VK 渲染尺寸与窗口解耦——离屏 LDR + blit 呈现，GL 同构方案）。
 
 图例：🏁 = 里程碑验收门；⛓ = 有前置依赖；产出物用 `代码格式` 标注。
 
@@ -270,9 +271,17 @@
       - 2026-09-19 三轮（#46）：绑定修复真机验证通过（VK 首次建链成功，fp32 管线就绪 mean=94ms）；
         验证层抓出 4 处合规问题全部修复：initialLayout=UNDEFINED+过渡屏障 / 帧提交补 vkEndCommandBuffer /
         ImGui 1.92 池类型（SAMPLED_IMAGE+SAMPLER）/ messenger 销毁泄漏
-      - ⚠ 512×512 GL 抹烟本轮 NMSE=1.000（输出全 0 特征值，疑 TDR：单帧 3423ms > 默认 2s TdrDelay；
-        同机当日早前 2516ms 达标 5.654e-04）——复跑确认，非代码缺陷
-      - ⏳ 等新包复跑：caps 应无验证层报错；VK smoke（--backend=vk --precision=fp32）NMSE 与 GL 对比 → T1.6.4 收官
+      - ⚠ 512×512 GL 抹烟三轮 NMSE=1.000（输出全 0 特征值，疑 TDR：单帧 3423ms > 默认 2s TdrDelay）
+        → **四轮复跑 3019ms NMSE=5.654e-04 通过，TDR 疑云解除，非代码缺陷**
+      - 2026-09-19 四轮（#47）：caps 全干净（验证层零报错）但 VK smoke 输出 180×32 ≠ 请求 32×32——
+        Windows 最小窗口 32×32 被拉大，VK final 直接画进交换链被窗口尺寸污染（GL 侧同款教训
+        早已用 final_fbo+glBlitFramebuffer 修复）；根修 = VK 渲染尺寸与窗口解耦：final 画进
+        离屏 LDR 图（请求分辨率）+ `vkCmdBlitImage` 线性拉伸呈现 + 读回从离屏图走
+        （交换链缺 TRANSFER_SRC / PRESENT_SRC 布局两处验证层报错随错误设计一并消失）；
+        开发机：编译通过、68 用例/41861 断言全过、GL smoke NMSE=1.625e-04 与基线同量级
+      - ⏳ 等新包复跑：caps 无报错；VK smoke（--backend=vk --precision=fp32 --golden=golden_tiny.pfm）
+        预期输出 **32×32**、NMSE 与 GL 同量级 → T1.6.4 收官、T1.6 关单；
+        VK 性能计时用 `EHE_VK_VALIDATE=0`（验证层开销可观）
 
 ### T1.7 UI 完整化 ⛓T1.3
 - [ ] T1.7.1 面板 7 组全参数（§8 表逐项）+ 自旋 a 灰显锁定
