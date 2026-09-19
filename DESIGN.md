@@ -1,4 +1,4 @@
-# Event Horizon Engine (EHE) — 开发文档 V5.11
+# Event Horizon Engine (EHE) — 开发文档 V5.12
 
 > **本文档是 EHE 项目开发的唯一权威依据。** 原始需求对话（`黑洞渲染模拟：Kerr度规光线....json`）仅为历史参考，
 > 凡本文档与对话冲突之处，以本文档为准。本文档不含代码；修改本文档需明确提出并递增版本号。
@@ -89,6 +89,14 @@
 >      **Vulkan 图像原点在左上，与 core 的"第 0 行 = 顶部"约定一致，故无需翻转**（GL 侧需要翻转）。
 >   ④ **链重建触发条件**：交换链尺寸变化 或 `res_scale` 档位变化 → 离屏目标尺寸随之变化，必须在帧开始前重建整条链。
 >   另：`ehe_render` 也需链接 `glslang::glslang-default-resource-limits`（`GetDefaultResources()` 不在主库内）。
+> V5.12（2026-09-19 真机首跑）：**Iris Xe 上 `--caps` 抓出两处 VK 建链失败**，各有普适教训：
+>   ① **描述符池容量 = 集合数 × 每集合描述符数**（不是集合数）——每集合 3 个 UBO（binding 0/3/4）
+>      却只按 1 个/集合分配，`vkAllocateDescriptorSets` 直接 OUT_OF_POOL。开发机无 ICD 编译期
+>      查不出这种"运行时资源账目"错误，只有真机能暴露。
+>   ② **提交路径的每个 VkResult 都要检查并进错误串**——首建成功、重建全挂的现象，若 begin/end/
+>      alloc/bind/map/waitIdle 的返回值被吞，就无法区分"提交参数错"与"device lost 级联"。
+>      现约定：`last_error` 一律带 `vk_result_name(result)` 后缀。
+>   真机已验证：设备探测 / shaderFloat64=no → 强制 fp32（V5.10 约定③落地）/ 5 shader 编出 SPIR-V ✓。
 
 ---
 

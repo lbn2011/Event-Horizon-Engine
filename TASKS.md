@@ -234,7 +234,14 @@
       - [x] 离屏目标（HDR 内部 / HDR 输出 ×2 + 交换链承载 LDR）+ GENERAL 布局与 pass 间内存屏障 + 4 pass 绘制链
       - [x] readback（capture_hdr / capture_ldr）+ pipeline_ready / rebuild_pipeline 落地
             （half→float 转换；LDR 从最近一帧交换链图像回读；尺寸/精度档变化时整链重建）
-      - [ ] ⏳ **目标机运行验证**（开发机无 Vulkan ICD）：`ehe --smoke --backend=vk` 与 GL 对比 NMSE/成品图
+      - **🔴 真机修复（Iris Xe 首跑 2026-09-19）**：`--caps` 暴露两处失败
+            - `分配描述符集失败` → **描述符池容量算错**：每集合 3 个 UBO（binding 0/3/4），池只按
+              1 个/集合算（8 集合需 24 UB 只给 8）→ vkAllocateDescriptorSets 返回 OUT_OF_POOL
+            - `LUT 上传失败`（重建时）→ 提交路径 6 个返回值全被吞（begin/end/alloc/bind/map/waitIdle），
+              无法判别根因 → 全部改为检查 + 错误串携带 VkResult；staging 失败路径补清理
+            - 顺带：config 不再把 golden 元数据键（"//"/"image"）报成未知键
+      - 真机已确认可用的部分：设备探测 ✓、shaderFloat64=no → 强制 fp32 策略 ✓、5 shader 编出 SPIR-V ✓
+      - [ ] ⏳ **目标机复跑**：新包 `--caps`（预期：VK fp32 管线就绪）→ `--smoke --backend=vk` 对比 NMSE
       - 备注：开发机无 Vulkan ICD（`vulkan-1.dll` 缺失）→ 按 DESIGN §2.1 约定，本机只做编译期验证，
         运行验证在目标机（Iris Xe，Vulkan 1.4.323 已实测可用）
 - [x] T1.6.2 glslang 库接入：启动时 GLSL→SPIR-V（含 include 展开后源码）
