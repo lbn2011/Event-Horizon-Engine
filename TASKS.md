@@ -244,7 +244,14 @@
         并断言 fp64 与 fp32 产物不同（精度开关真生效）——§6 L4 的"GPU 不进 CI"边界下，VK shader 路径已可被完全验证
       - 实现要点：`glslang::glslang` 主库已含 SPIRV（ENABLE_OPT=OFF，无需 SPIRV-Tools）；
         SPIRV 头路径是 `<SPIRV/GlslangToSpv.h>`（与 glslang 目录同级）
-- [ ] T1.6.3 面板后端切换：窗口句柄销毁重建 + Config 保留（§5.2）
+- [x] T1.6.3 面板后端切换：窗口句柄销毁重建 + Config 保留（§5.2）
+      - 主循环（T0.4 已有）+ 本轮补齐 3 处：① 切换失败**回退到原后端**继续跑（原实现直接退出，
+        违背"进程不退"精神），回退仍失败才退出；② **修复 VK init 不建链的漏洞**（此前的 CMake/接入替换
+        未命中 init 实际结构 → VK 起窗后渲染链永远不会创建；现与 GL build_pipeline 同语义：init 内建链、
+        失败不致命、错误走 last_error）；③ **修复 VK init 丢精度宏**：--precision=fp32 传入的
+        EHE_FP32_ONLY 此前只在 rebuild_pipeline 路径生效，init 路径用 effective_shader_defines({}) 会丢掉
+        （fp64 可用的设备会跑成 mixed）——现 init 内统一规整 cfg.shader_defines，并落地 cfg.shader_root
+      - ⏳ 运行验证随 T1.6.4 目标机一起做（面板下拉切后端）
 - [ ] T1.6.4 🏁 目标机双后端截图对比（§12 风险缓解）
 
 ### T1.7 UI 完整化 ⛓T1.3
