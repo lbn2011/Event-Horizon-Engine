@@ -48,6 +48,20 @@ float half_to_float(std::uint16_t value) {
     return sign != 0 ? -result : result;
 }
 
+/// 把 VkResult 拼成可读后缀（目标机日志定位用：错误串直接携带结果码，
+/// 否则"分配描述符集失败"这类文案无法区分 OUT_OF_POOL / DEVICE_LOST）
+std::string vk_result_name(VkResult result) {
+    switch (result) {
+        case VK_SUCCESS: return "（SUCCESS）";
+        case VK_ERROR_OUT_OF_HOST_MEMORY: return "（OUT_OF_HOST_MEMORY）";
+        case VK_ERROR_OUT_OF_DEVICE_MEMORY: return "（OUT_OF_DEVICE_MEMORY）";
+        case VK_ERROR_DEVICE_LOST: return "（DEVICE_LOST）";
+        case VK_ERROR_MEMORY_MAP_FAILED: return "（MEMORY_MAP_FAILED）";
+        case VK_ERROR_FRAGMENTED_POOL: return "（FRAGMENTED_POOL）";
+        default: return "（VkResult=" + std::to_string(static_cast<int>(result)) + "）";
+    }
+}
+
 }  // namespace
 
 struct RaymarchChain::Impl {
@@ -187,34 +201,55 @@ struct RaymarchChain::Impl {
         return vkMapMemory(info.device, memory, 0, size, 0, &mapped) == VK_SUCCESS;
     }
 
-    /// 一次性命令缓冲（LUT 上传等）
-    bool submit_one_shot(const std::function<void(VkCommandBuffer)>& record) {
+    /// 一次性命令缓冲（LUT 上传等）。err 非空时带回带 VkResult 的失败原因。
+    /// 为什么全路径检查：目标机（Iris Xe）实测出现过"首建成功、重建全挂"，若返回值被吞
+    /// 就无法区分是提交参数问题还是 device lost 级联——每个返回值都必须可见。
+    bool submit_one_shot(const std::function<void(VkCommandBuffer)>& record,
+                         std::string* err = nullptr) {
+        auto fail = [err](const char* what, VkResult r) {
+            if (err != nullptr) {
+                *err = std::string(what) + vk_result_name(r);
+            }
+            return false;
+        };
         VkCommandBufferAllocateInfo allocate{};
         allocate.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         allocate.commandPool = upload_pool;
         allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         allocate.commandBufferCount = 1;
         VkCommandBuffer cmd = VK_NULL_HANDLE;
-        if (vkAllocateCommandBuffers(info.device, &allocate, &cmd) != VK_SUCCESS) {
-            return false;
+        VkResult r = vkAllocateCommandBuffers(info.device, &allocate, &cmd);
+        if (r != VK_SUCCESS) {
+            return fail("分配命令缓冲失败", r);
         }
         VkCommandBufferBeginInfo begin{};
         begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(cmd, &begin);
+        r = vkBeginCommandBuffer(cmd, &begin);
+        if (r != VK_SUCCESS) {
+            vkFreeCommandBuffers(info.device, upload_pool, 1, &cmd);
+            return fail("begin 命令缓冲失败", r);
+        }
         record(cmd);
-        vkEndCommandBuffer(cmd);
+        r = vkEndCommandBuffer(cmd);
+        if (r != VK_SUCCESS) {
+            vkFreeCommandBuffers(info.device, upload_pool, 1, &cmd);
+            return fail("end 命令缓冲失败", r);
+        }
 
         VkSubmitInfo submit{};
         submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submit.commandBufferCount = 1;
         submit.pCommandBuffers = &cmd;
-        const VkResult result = vkQueueSubmit(info.queue, 1, &submit, VK_NULL_HANDLE);
-        if (result == VK_SUCCESS) {
-            vkQueueWaitIdle(info.queue);
+        r = vkQueueSubmit(info.queue, 1, &submit, VK_NULL_HANDLE);
+        if (r == VK_SUCCESS) {
+            r = vkQueueWaitIdle(info.queue);  // 等待结果不再吞掉（device lost 会在这里显形）
         }
         vkFreeCommandBuffers(info.device, upload_pool, 1, &cmd);
-        return result == VK_SUCCESS;
+        if (r != VK_SUCCESS) {
+            return fail("提交/等待队列失败", r);
+        }
+        return true;
     }
 
     /// GENERAL → GENERAL 的写后读屏障（离屏图像既作附件又作采样源）
@@ -442,32 +477,61 @@ bool RaymarchChain::init(const ChainInitInfo& info) {
             last_error_ = "创建 LUT staging 缓冲失败";
             return false;
         }
+        // 失败路径统一清理（staging 缓冲/内存不泄漏）
+        auto staging_cleanup = [&]() {
+            vkDestroyBuffer(info.device, staging, nullptr);
+            if (staging_memory != VK_NULL_HANDLE) {
+                vkFreeMemory(info.device, staging_memory, nullptr);
+            }
+        };
         VkMemoryRequirements requirements{};
         vkGetBufferMemoryRequirements(info.device, staging, &requirements);
         const std::uint32_t type =
             impl_->find_memory_type(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                                                                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (type == UINT32_MAX) {
+            last_error_ = "LUT staging：找不到 HOST_VISIBLE 内存类型";
+            staging_cleanup();
+            return false;
+        }
         VkMemoryAllocateInfo allocate{};
         allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         allocate.allocationSize = requirements.size;
         allocate.memoryTypeIndex = type;
-        vkAllocateMemory(info.device, &allocate, nullptr, &staging_memory);
-        vkBindBufferMemory(info.device, staging, staging_memory, 0);
-        vkMapMemory(info.device, staging_memory, 0, bytes, 0, &staging_mapped);
+        VkResult r = vkAllocateMemory(info.device, &allocate, nullptr, &staging_memory);
+        if (r != VK_SUCCESS) {
+            last_error_ = "分配 LUT staging 内存失败" + vk_result_name(r);
+            staging_cleanup();
+            return false;
+        }
+        r = vkBindBufferMemory(info.device, staging, staging_memory, 0);
+        if (r != VK_SUCCESS) {
+            last_error_ = "绑定 LUT staging 内存失败" + vk_result_name(r);
+            staging_cleanup();
+            return false;
+        }
+        r = vkMapMemory(info.device, staging_memory, 0, bytes, 0, &staging_mapped);
+        if (r != VK_SUCCESS) {
+            last_error_ = "映射 LUT staging 内存失败" + vk_result_name(r);
+            staging_cleanup();
+            return false;
+        }
         std::memcpy(staging_mapped, lut_rgba.data(), static_cast<std::size_t>(bytes));
         vkUnmapMemory(info.device, staging_memory);
 
-        const bool uploaded = impl_->submit_one_shot([&](VkCommandBuffer cmd) {
-            VkBufferImageCopy region{};
-            region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            region.imageExtent = {static_cast<std::uint32_t>(count), 1, 1};
-            vkCmdCopyBufferToImage(cmd, staging, impl_->lut_image, VK_IMAGE_LAYOUT_GENERAL, 1,
-                                   &region);
-        });
-        vkDestroyBuffer(info.device, staging, nullptr);
-        vkFreeMemory(info.device, staging_memory, nullptr);
+        std::string upload_err;
+        const bool uploaded = impl_->submit_one_shot(
+            [&](VkCommandBuffer cmd) {
+                VkBufferImageCopy region{};
+                region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                region.imageExtent = {static_cast<std::uint32_t>(count), 1, 1};
+                vkCmdCopyBufferToImage(cmd, staging, impl_->lut_image, VK_IMAGE_LAYOUT_GENERAL, 1,
+                                       &region);
+            },
+            &upload_err);
+        staging_cleanup();
         if (!uploaded) {
-            last_error_ = "LUT 上传失败";
+            last_error_ = "LUT 上传失败：" + upload_err;
             return false;
         }
         std::printf("[vk] 黑体 LUT 已上传：%zu 点（RGBA32F）\n", count);
@@ -514,8 +578,11 @@ bool RaymarchChain::init(const ChainInitInfo& info) {
             return false;
         }
 
+        // 池容量按"集合数 × 每集合描述符数"算：每集合 3 个 UBO（binding 0/3/4）+ 2 个 CIS（1/2）。
+        // 首版 UBO 只按 1 个/集合算 → 真机 vkAllocateDescriptorSets 返回 OUT_OF_POOL
+        //（表现为"分配描述符集失败"，Iris Xe 实测 2026-09-19）
         std::array<VkDescriptorPoolSize, 2> sizes{};
-        sizes[0] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kPassCount * kFramesInFlight};
+        sizes[0] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kPassCount * kFramesInFlight * 3};
         sizes[1] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kPassCount * kFramesInFlight * 2};
         VkDescriptorPoolCreateInfo pool_create{};
         pool_create.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -656,13 +723,29 @@ bool RaymarchChain::init(const ChainInitInfo& info) {
         const std::uint32_t type =
             impl_->find_memory_type(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                                                                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (type == UINT32_MAX) {
+            last_error_ = "读回缓冲：找不到 HOST_VISIBLE 内存类型";
+            return false;
+        }
         VkMemoryAllocateInfo allocate{};
         allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         allocate.allocationSize = requirements.size;
         allocate.memoryTypeIndex = type;
-        vkAllocateMemory(info.device, &allocate, nullptr, &impl_->readback_memory);
-        vkBindBufferMemory(info.device, impl_->readback_buffer, impl_->readback_memory, 0);
-        vkMapMemory(info.device, impl_->readback_memory, 0, needed, 0, &impl_->readback_mapped);
+        VkResult r = vkAllocateMemory(info.device, &allocate, nullptr, &impl_->readback_memory);
+        if (r != VK_SUCCESS) {
+            last_error_ = "分配读回内存失败" + vk_result_name(r);
+            return false;
+        }
+        r = vkBindBufferMemory(info.device, impl_->readback_buffer, impl_->readback_memory, 0);
+        if (r != VK_SUCCESS) {
+            last_error_ = "绑定读回内存失败" + vk_result_name(r);
+            return false;
+        }
+        r = vkMapMemory(info.device, impl_->readback_memory, 0, needed, 0, &impl_->readback_mapped);
+        if (r != VK_SUCCESS) {
+            last_error_ = "映射读回内存失败" + vk_result_name(r);
+            return false;
+        }
         impl_->readback_size = needed;
     }
 

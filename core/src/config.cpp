@@ -307,7 +307,9 @@ Config Config::from_json(const nlohmann::json& json, std::vector<std::string>* w
     }
 
     // 顶层未知键
-    collect_unknown_keys(json, {"render", "blackhole", "integrator", "particle", "post", "audio", "camera"},
+    // "//" 与 "image" 是 golden 参数文件的元数据（注释键 / 输出尺寸），非渲染配置 → 静默忽略
+    collect_unknown_keys(json, {"render", "blackhole", "integrator", "particle", "post", "audio",
+                                "camera", "//", "image"},
                          "顶层", warnings);
 
     config.validate_and_clamp(warnings);
