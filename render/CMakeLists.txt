@@ -11,12 +11,15 @@ add_library(ehe_render STATIC
   src/renderer_info.cpp
   src/shader_source.cpp
   src/sim_params.cpp
+  src/spirv.cpp
 )
 
 target_include_directories(ehe_render PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 target_link_libraries(ehe_render
   PUBLIC ehe_core
+  # GLSL → SPIR-V（VK 侧运行时编译，§5.2）；头文件不暴露 glslang 类型，故 PRIVATE
+  PRIVATE glslang::glslang
   PRIVATE ehe_warnings
   PRIVATE ehe_options
 )
