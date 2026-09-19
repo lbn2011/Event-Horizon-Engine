@@ -1,4 +1,4 @@
-# Event Horizon Engine (EHE) — 开发文档 V5.17
+# Event Horizon Engine (EHE) — 开发文档 V5.18
 
 > **本文档是 EHE 项目开发的唯一权威依据。** 原始需求对话（`黑洞渲染模拟：Kerr度规光线....json`）仅为历史参考，
 > 凡本文档与对话冲突之处，以本文档为准。本文档不含代码；修改本文档需明确提出并递增版本号。
@@ -172,6 +172,41 @@
 >   开发机：编译零警告、68 用例/41861 断言全绿、GL smoke 1.625e-04 不变（shader 未动，
 >   GL 链不受影响）。教训：**行序约定要沿"渲染 → 采样 → 读回 → 呈现"全链核对**，
 >   "图像原点在左上"说的是屏幕方向，不决定数据第 0 行与 CPU 侧的对应关系。
+> V5.18（2026-09-20）：**T1.7 UI 完整化 + T1.8 粒子/音频全链实施**（GL 与 app 层完成实现，
+>   VK 侧同帧落地；真机验证待目标机复跑）。
+>   实现要点（规格 → 实现的映射，后续排查以此为索引）：
+>   ① **SimParams 语义增补**（布局不变，仍 176 字节/11×vec4）：`flags[3]`（原 pad）启用为
+>     `w = particle_size`（位打包 float，C++ pack_float / shader uintBitsToFloat）；
+>     新 flag 位 `kFlagParticleEnabled (1<<6)`（raymarch 模式叠加）与 `kFlagAnimate (1<<7)`
+>     （动画推进 + 粒子步进开关，app 层置位）；`kFlagParticle (1<<3)` 语义 = 独立粒子模式
+>     （跳过 raymarch，黑背景 + 粒子）。
+>   ② **raymarch.frag alpha 通道写 `float(step_used)`**（V5.18 平均步数数据源；RGB 不变，
+>     不进 PFM 差分——GL 用 mipmap 归约读 alpha，VK 用逐级 blit 归约）。
+>   ③ **粒子（§5.6）**：初始分布由 `core::generate_particle_buffer`（环带均匀 + 高斯厚度
+>     σ=0.5M + 开普勒 ±5%，固定种子 20260920 可复现）一次性上传 SSBO（binding 2，
+>     每粒子 2×vec4）；`particle_update.comp` leapfrog KDK 积分（dt=0.05，盘平面弹簧
+>     0.02·z，r<2M 或 r>50M hash 重生）；`particle_draw.vert/frag` 点精灵 vertex pulling
+>     （gl_VertexID/gl_VertexIndex，透视点径 clamp[1,24]，温度=盘通量剖面）+ LUT 上色
+>     + 加色混合（GL_ONE/GL_ONE）在色调映射前进 HDR。粒子数变化即重建（clamp ≤ 1e6）。
+>   ④ **双后端实现差异**：GL = GL_SHADER_STORAGE_BUFFER + glDispatchCompute + mipmap 归约
+>     （glGenerateMipmap + 读最后级 1×1 alpha；mip 级数 = floor(log2(max))+1）+ 双缓冲
+>     GL_TIME_ELAPSED query；VK = **SSBO 双缓冲**（frames-in-flight 各一份，compute 写
+>     slot N、point draw 读同份——跨提交无读写竞争）+ 独立 descriptor set（binding 0
+>     UBO vert+compute / 1 LUT frag / 2 SSBO vert+compute；主链 binding 2 已被 post 输入
+>     占用）+ point pass（loadOp=LOAD，attachment 与 hdr_pass 兼容可复用 framebuffer）+
+>     逐级 blit 归约到 1×1（同 image 不同 mip，region 不重叠，每级 TRANSFER 写后读屏障）
+>     + timestamp query（每 slot 帧首/帧尾一对，vkGetQueryPoolResults 非阻塞轮询）。
+>     粒子 shader/管线创建失败不拖垮主链（particle_ready=false，overlay 显示 n/a）。
+>   ⑤ **监控 overlay（§8）**：独立 ImGui 窗口右上角（FPS/帧时/内部×输出/后端/GPU ms/
+>     平均步数，不可用显示 n/a）；主面板 checkbox 开关，不进 Config schema。
+>   ⑥ **面板 7 组（§8）+ Config 持久化（§8.1）**：渲染/黑洞（自旋 a 灰显锁 0，
+>     ImGui::BeginDisabled）/积分器（精度切换→rebuild_pipeline）/粒子（牛顿近似警示标注
+>     ——T1.8.2 UI 明示"与 GR 模式不具物理一致性"）/后处理/音频/相机（orbit+fly 双模式，
+>     fly 速度三档 5/15/40 单位每秒）。启动加载顺序 = 显式 --config > ehe.config.json
+>     （存在则优先）> 默认 golden 参数；退出/切后端前 persist（camera.write_to + save）。
+>   ⑦ **音频（§5.7）**：miniaudio 0.11.25（Deps 已 pin），48kHz 单声道 data callback
+>     （音频线程独立，参数全 atomic）；棕噪声 x←0.998x+0.02w → 单极点低通
+>     （截止 = 40+200·norm(盘密度)，增益 ∝ √norm）。初始化失败静默降级（无音频不致命）。
 
 ---
 

@@ -108,6 +108,23 @@ public:
     /// 这是后处理链唯一的数值验证途径（它作用在 golden 之前，不进 NMSE 差分，§6.1）。
     /// @param rgb 输出缓冲（3 × width × height，8 位，**第 0 行 = 图像顶部**）
     virtual bool capture_ldr(std::vector<unsigned char>& rgb, int& width, int& height) = 0;
+
+    // ---------------------------------------------------------------- 监控 overlay（T1.7.2，§8）
+
+    /// 内部渲染分辨率（×res_scale 后的实际渲染尺寸；overlay 显示「内部×输出」用）。
+    /// 上下文未创建/管线未就绪时写 0。
+    virtual void render_resolution(int& width, int& height) const {
+        width = 0;
+        height = 0;
+    }
+
+    /// 最近一帧 GPU 耗时（毫秒；timer query 实现，天然 1 帧延迟）。
+    /// 后端不支持计时（或尚未积累到首帧结果）时返回负值，overlay 显示 n/a。
+    virtual double gpu_frame_ms() const { return -1.0; }
+
+    /// 最近一帧 raymarch 平均步数（全图 alpha 通道归约，§5.4 raymarch.frag 输出）。
+    /// 粒子模式（跳过 raymarch）或尚未积累时返回负值，overlay 显示 n/a。
+    virtual double last_avg_steps() const { return -1.0; }
 };
 
 }  // namespace ehe::render

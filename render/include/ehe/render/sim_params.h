@@ -34,9 +34,11 @@ enum SimFlags : std::uint32_t {
     kFlagFsr1 = 1U << 0,
     kFlagFxaa = 1U << 1,
     kFlagAces = 1U << 2,
-    kFlagParticle = 1U << 3,
+    kFlagParticle = 1U << 3,       ///< 渲染模式 = 粒子（独立显示，跳过 raymarch 背景）
     kFlagFp32Only = 1U << 4,
     kFlagDiskEnabled = 1U << 5,
+    kFlagParticleEnabled = 1U << 6,  ///< 粒子启用（raymarch 模式下叠加显示，§5.6）
+    kFlagAnimate = 1U << 7,          ///< 动画推进（time 随帧推进 + 粒子积分步进；app 层置位）
 };
 
 /// std140 布局的 UBO 数据（每个 vec4 = 16 字节，总 176 字节）
@@ -57,7 +59,8 @@ struct SimParams {
     float hole[4] = {0.0F, 6.0F, 20.0F, 1.0F};
     // [8] t_scale / kappa / exposure / chrom_ab
     float disk[4] = {10000.0F, 2.0F, 1.0F, 0.5F};
-    // [9] flags / res_scale / particle_count / pad
+    // [9] flags / res_scale / particle_count / particle_size
+    /// w = particle_size（V5.18 启用原 pad 槽位：位打包 float，§5.6 面板参数「大小」）
     std::uint32_t flags[4] = {kFlagDiskEnabled, 0x3F800000U /* 1.0f */, 0U, 0U};
     // [10] emission_scale / thickness_scale / debug_view / pad
     float extras[4] = {2.5F, 0.1F, 0.0F, 0.0F};

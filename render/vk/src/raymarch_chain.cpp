@@ -13,6 +13,7 @@
 
 #include "ehe/render/vk/raymarch_chain.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -20,6 +21,7 @@
 #include <functional>
 
 #include "ehe/core/blackbody.h"
+#include "ehe/core/particles.h"
 #include "ehe/render/spirv.h"
 
 namespace ehe::render::vk {
@@ -126,6 +128,46 @@ struct RaymarchChain::Impl {
 
     VkCommandPool upload_pool = VK_NULL_HANDLE;
 
+    // ---------------------------------------------------------------- 粒子（T1.8.1，§5.6）
+    // SSBO 按 frames-in-flight 双缓冲（与 UBO 同一惯例）：frame N 的 compute 写 slot N 的
+    // buffer、point draw 读同一份（同提交内 barrier 保证）；frame N-1 读 slot 1 —— 两个
+    // frame slot 的 SSBO 互不相交，杜绝跨提交读写竞争。
+    VkShaderModule compute_module = VK_NULL_HANDLE;
+    VkShaderModule point_vertex_module = VK_NULL_HANDLE;
+    VkShaderModule point_fragment_module = VK_NULL_HANDLE;
+    VkPipeline compute_pipeline = VK_NULL_HANDLE;
+    VkPipeline point_pipeline = VK_NULL_HANDLE;
+    VkPipelineLayout particle_pipeline_layout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout particle_set_layout = VK_NULL_HANDLE;
+    VkDescriptorPool particle_descriptor_pool = VK_NULL_HANDLE;
+    std::array<VkDescriptorSet, kFramesInFlight> particle_sets{};
+    std::array<VkBuffer, kFramesInFlight> particle_buffers{};
+    std::array<VkDeviceMemory, kFramesInFlight> particle_memories{};
+    std::uint32_t particle_capacity = 0;  ///< 已上传的粒子数（0 = 未上传；变化即重建）
+    bool particle_ready = false;          ///< 粒子链是否可用（shader/管线创建失败不拖垮主链）
+
+    // 粒子专用 render pass：attachment 描述与 hdr_pass 一致（格式/samples 相同 → 与
+    // hdr_framebuffers[0] 兼容，可复用），仅 loadOp=LOAD —— 保留 raymarch 输出做加色叠加。
+    VkRenderPass point_pass = VK_NULL_HANDLE;
+
+    // ---------------------------------------------------------------- GPU 统计（T1.7.2）
+    // GPU 计时：timestamp query，每 frame slot 一对（帧首/帧尾），避免跨 slot 复用未完成结果
+    VkQueryPool timer_pool = VK_NULL_HANDLE;
+    double timer_period_ms = -1.0;  ///< timestampPeriod 换算；<0 = 设备不支持计时
+
+    // 平均步数：alpha 通道逐级 blit 归约到 1×1（与 GL 的 mipmap 归约同语义），末端拷到
+    // host-visible 缓冲延迟读（拷贝是异步的，读到的可能是上一轮的值——overlay 用途足够）
+    VkImage reduction_image = VK_NULL_HANDLE;
+    VkDeviceMemory reduction_memory = VK_NULL_HANDLE;
+    std::uint32_t reduction_mips = 0;  ///< = floor(log2(max(w,h))) + 1（与 GL 公式一致）
+    bool reduction_ready = false;      ///< 设备不支持 16F blit 时禁用（显示 n/a）
+    VkBuffer steps_buffer = VK_NULL_HANDLE;
+    VkDeviceMemory steps_memory = VK_NULL_HANDLE;
+    void* steps_mapped = nullptr;
+    int steps_frame_counter = 0;
+    mutable float avg_steps_cache = -1.0F;  ///< gpu_frame_ms/last_avg_steps 由 const 方法更新
+    mutable double gpu_ms_cache = -1.0;
+
     // ---------------------------------------------------------------- 工具
 
     std::uint32_t find_memory_type(std::uint32_t allowed, VkMemoryPropertyFlags wanted) const {
@@ -141,13 +183,14 @@ struct RaymarchChain::Impl {
     }
 
     bool create_image(std::uint32_t width, std::uint32_t height, VkFormat format,
-                      VkImageUsageFlags usage, VkImage& image, VkDeviceMemory& memory) {
+                      VkImageUsageFlags usage, VkImage& image, VkDeviceMemory& memory,
+                      std::uint32_t mip_levels = 1) {
         VkImageCreateInfo create{};
         create.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         create.imageType = VK_IMAGE_TYPE_2D;
         create.format = format;
         create.extent = {width, height, 1};
-        create.mipLevels = 1;
+        create.mipLevels = mip_levels;
         create.arrayLayers = 1;
         create.samples = VK_SAMPLE_COUNT_1_BIT;
         create.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -223,6 +266,36 @@ struct RaymarchChain::Impl {
         return vkMapMemory(info.device, memory, 0, size, 0, &mapped) == VK_SUCCESS;
     }
 
+    /// 任意用途的缓冲创建（device local 或 host visible 均可；粒子 SSBO 与 steps 读回用）。
+    /// 与 create_host_buffer 不同：不绑定固定 usage、不映射，由调用方按需处理。
+    bool create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags wanted,
+                       VkBuffer& buffer, VkDeviceMemory& memory) {
+        VkBufferCreateInfo create{};
+        create.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        create.size = size;
+        create.usage = usage;
+        create.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(info.device, &create, nullptr, &buffer) != VK_SUCCESS) {
+            return false;
+        }
+        VkMemoryRequirements requirements{};
+        vkGetBufferMemoryRequirements(info.device, buffer, &requirements);
+        const std::uint32_t type = find_memory_type(requirements.memoryTypeBits, wanted);
+        if (type == UINT32_MAX) {
+            return false;
+        }
+        VkMemoryAllocateInfo allocate{};
+        allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = type;
+        if (vkAllocateMemory(info.device, &allocate, nullptr, &memory) != VK_SUCCESS) {
+            return false;
+        }
+        // 绑定内存同图像同理：缺绑定 = 无后备存储，首次 GPU 访问即 page fault
+        const VkResult bound = vkBindBufferMemory(info.device, buffer, memory, 0);
+        return bound == VK_SUCCESS;
+    }
+
     /// 一次性命令缓冲（LUT 上传等）。err 非空时带回带 VkResult 的失败原因。
     /// 为什么全路径检查：目标机（Iris Xe）实测出现过"首建成功、重建全挂"，若返回值被吞
     /// 就无法区分是提交参数问题还是 device lost 级联——每个返回值都必须可见。
@@ -290,6 +363,104 @@ struct RaymarchChain::Impl {
                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
                              &barrier);
     }
+
+    /// 粒子数变化时重建双缓冲 SSBO 并上传初始分布（core/particles.cpp 生成，§5.6 规则）。
+    /// 与 GL 的 ensure_particles 同语义：count 变化即重建；固定种子 → 初始分布可复现。
+    /// 成功后补写各 frame slot 描述符的 binding 2（SSBO），返回 false 时 particle_ready 置 false。
+    bool upload_particles(std::uint32_t count, float r_in, float r_out) {
+        const std::uint32_t clamped =
+            count < 1000000U ? count : 1000000U;  // 与 GL 的 clamp(0, 1'000'000) 对齐
+        if (clamped == particle_capacity) {
+            return true;
+        }
+        const std::vector<float> initial = core::generate_particle_buffer(
+            static_cast<std::size_t>(clamped), 1.0, r_in, r_out,
+            0.5, 20260920ULL);  // σ=0.5M【§5.6 建议默认】；种子与 GL 一致
+        const VkDeviceSize bytes =
+            static_cast<VkDeviceSize>(initial.size() * sizeof(float));
+
+        // 销毁旧 buffer（容量变化 → 尺寸变化 → 一律重建两份）
+        for (std::uint32_t slot = 0; slot < kFramesInFlight; ++slot) {
+            if (particle_buffers[slot] != VK_NULL_HANDLE) {
+                vkDestroyBuffer(info.device, particle_buffers[slot], nullptr);
+                particle_buffers[slot] = VK_NULL_HANDLE;
+            }
+            if (particle_memories[slot] != VK_NULL_HANDLE) {
+                vkFreeMemory(info.device, particle_memories[slot], nullptr);
+                particle_memories[slot] = VK_NULL_HANDLE;
+            }
+        }
+        if (bytes == 0) {
+            particle_capacity = clamped;  // count=0：无需资源，描述符留空（不 bind 即可）
+            return true;
+        }
+
+        VkBuffer staging = VK_NULL_HANDLE;
+        VkDeviceMemory staging_memory = VK_NULL_HANDLE;
+        void* staging_mapped = nullptr;
+        if (!create_buffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                           staging, staging_memory)) {
+            return false;
+        }
+        if (vkMapMemory(info.device, staging_memory, 0, bytes, 0, &staging_mapped) != VK_SUCCESS) {
+            vkDestroyBuffer(info.device, staging, nullptr);
+            vkFreeMemory(info.device, staging_memory, nullptr);
+            return false;
+        }
+        std::memcpy(staging_mapped, initial.data(), static_cast<std::size_t>(bytes));
+        vkUnmapMemory(info.device, staging_memory);
+
+        for (std::uint32_t slot = 0; slot < kFramesInFlight; ++slot) {
+            if (!create_buffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, particle_buffers[slot],
+                               particle_memories[slot])) {
+                vkDestroyBuffer(info.device, staging, nullptr);
+                vkFreeMemory(info.device, staging_memory, nullptr);
+                return false;
+            }
+        }
+
+        // 一条 one-shot 提交把 staging 拷进两份 device-local SSBO（拷完 QueueWaitIdle）
+        std::string upload_err;
+        bool copied = true;
+        if (!submit_one_shot(
+                [&](VkCommandBuffer cmd) {
+                    VkBufferCopy region{};
+                    region.size = bytes;
+                    vkCmdCopyBuffer(cmd, staging, particle_buffers[0], 1, &region);
+                    vkCmdCopyBuffer(cmd, staging, particle_buffers[1], 1, &region);
+                },
+                &upload_err)) {
+            std::fprintf(stderr, "[vk] 粒子 SSBO 上传失败：%s\n", upload_err.c_str());
+            copied = false;
+        }
+        vkDestroyBuffer(info.device, staging, nullptr);
+        vkFreeMemory(info.device, staging_memory, nullptr);
+        if (!copied) {
+            return false;
+        }
+
+        // 补写各 slot 描述符的 binding 2（init 时 SSBO 尚不存在，只写了 binding 0/1）
+        for (std::uint32_t slot = 0; slot < kFramesInFlight; ++slot) {
+            const VkDescriptorBufferInfo ssbo_info{particle_buffers[slot], 0, bytes};
+            VkWriteDescriptorSet write{};
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = particle_sets[slot];
+            write.dstBinding = 2;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            write.pBufferInfo = &ssbo_info;
+            vkUpdateDescriptorSets(info.device, 1, &write, 0, nullptr);
+        }
+
+        particle_capacity = clamped;
+        std::printf("[vk] 粒子 SSBO 就绪：%u 粒子 ×2 份（%llu 字节/份）\n", clamped,
+                    static_cast<unsigned long long>(bytes));
+        return true;
+    }
 };
 
 // ---------------------------------------------------------------- 生命周期
@@ -345,6 +516,32 @@ bool RaymarchChain::init(const ChainInitInfo& info) {
         }
         impl_->fragment_modules[static_cast<std::size_t>(pass)] = make_module(fragment.words);
     }
+
+    // ---- 粒子 shader（T1.8.1）：编译/创建失败**不拖垮主链**（与 GL 的 build_pipeline 同策略）----
+    {
+        const SpirvResult comp = compile_shader_file_stage(
+            info.shader_root + "/particle_update.comp", roots, ShaderStage::Compute,
+            info.shader_defines);
+        const SpirvResult point_vert = compile_shader_file_stage(
+            info.shader_root + "/particle_draw.vert", roots, ShaderStage::Vertex,
+            info.shader_defines);
+        const SpirvResult point_frag = compile_shader_file_stage(
+            info.shader_root + "/particle_draw.frag", roots, ShaderStage::Fragment,
+            info.shader_defines);
+        if (comp.ok && point_vert.ok && point_frag.ok) {
+            impl_->compute_module = make_module(comp.words);
+            impl_->point_vertex_module = make_module(point_vert.words);
+            impl_->point_fragment_module = make_module(point_frag.words);
+            impl_->particle_ready = (impl_->compute_module != VK_NULL_HANDLE &&
+                                     impl_->point_vertex_module != VK_NULL_HANDLE &&
+                                     impl_->point_fragment_module != VK_NULL_HANDLE);
+        } else {
+            const std::string& bad =
+                !comp.ok ? comp.log : (!point_vert.ok ? point_vert.log : point_frag.log);
+            std::fprintf(stderr, "[vk] 粒子 shader 编译失败（主链不受影响）：%s\n", bad.c_str());
+        }
+    }
+
     std::printf("[vk] 5 个 shader 模块就绪（SPIR-V；精度宏：");
     for (const std::string& define : info.shader_defines) {
         std::printf("%s ", define.c_str());
@@ -429,6 +626,51 @@ bool RaymarchChain::init(const ChainInitInfo& info) {
                 last_error_ = "创建 HDR framebuffer 失败";
                 return false;
             }
+        }
+    }
+
+    // ---- 粒子 point pass（loadOp=LOAD：保留 raymarch 输出，粒子加色叠加）----
+    // attachment 描述与 hdr_pass 相同（格式/samples 一致 → 与 hdr_framebuffers 兼容，
+    // 复用 framebuffer 无需成对创建——与 vk_backend 的 clear/load 双 pass 同一手法）。
+    // 注意 dependency 的 srcAccess 须含 COLOR_WRITE、dstAccess 须含 COLOR_READ：
+    // loadOp=LOAD 的"读"需要外部依赖保证先前写入完成（hdr_pass 的 DONT_CARE 无此要求）。
+    if (impl_->particle_ready) {
+        VkAttachmentDescription color{};
+        color.format = hdr_format;
+        color.samples = VK_SAMPLE_COUNT_1_BIT;
+        color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        color.initialLayout = VK_IMAGE_LAYOUT_GENERAL;
+        color.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkAttachmentReference reference{0, VK_IMAGE_LAYOUT_GENERAL};
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &reference;
+
+        VkSubpassDependency dependency{};
+        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dependency.dstAccessMask =
+            VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+        VkRenderPassCreateInfo create{};
+        create.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        create.attachmentCount = 1;
+        create.pAttachments = &color;
+        create.subpassCount = 1;
+        create.pSubpasses = &subpass;
+        create.dependencyCount = 1;
+        create.pDependencies = &dependency;
+        if (vkCreateRenderPass(info.device, &create, nullptr, &impl_->point_pass) != VK_SUCCESS) {
+            last_error_ = "创建粒子 point render pass 失败";
+            return false;
         }
     }
 
@@ -732,6 +974,91 @@ bool RaymarchChain::init(const ChainInitInfo& info) {
         }
     }
 
+    // ---- 粒子描述符资源（T1.8.1）----
+    // 独立于主链 set_layout：主链 binding 2 已是 post 输入纹理，粒子 SSBO 无法共用一套布局。
+    // 编号与 GL 对齐（§5.4.1）：0 = SimParams UBO（vert+compute 读）、1 = LUT（frag）、
+    // 2 = 粒子 SSBO（compute 读写 + vert pulling）。binding 2 在 upload_particles 时补写
+    //（init 时 SSBO 尚未创建——容量由首帧参数决定）。
+    if (impl_->particle_ready) {
+        std::array<VkDescriptorSetLayoutBinding, 3> particle_bindings{};
+        particle_bindings[0] = {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        particle_bindings[1] = {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        particle_bindings[2] = {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo layout_info{};
+        layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layout_info.bindingCount = static_cast<std::uint32_t>(particle_bindings.size());
+        layout_info.pBindings = particle_bindings.data();
+        if (vkCreateDescriptorSetLayout(info.device, &layout_info, nullptr,
+                                        &impl_->particle_set_layout) != VK_SUCCESS) {
+            last_error_ = "创建粒子描述符布局失败";
+            return false;
+        }
+
+        // 池容量精确到需求（真机 OUT_OF_POOL 的教训）：2 set ×（1 UBO + 1 CIS + 1 SSBO）
+        std::array<VkDescriptorPoolSize, 3> sizes{};
+        sizes[0] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kFramesInFlight};
+        sizes[1] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kFramesInFlight};
+        sizes[2] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kFramesInFlight};
+        VkDescriptorPoolCreateInfo pool_create{};
+        pool_create.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        pool_create.maxSets = kFramesInFlight;
+        pool_create.poolSizeCount = static_cast<std::uint32_t>(sizes.size());
+        pool_create.pPoolSizes = sizes.data();
+        if (vkCreateDescriptorPool(info.device, &pool_create, nullptr,
+                                   &impl_->particle_descriptor_pool) != VK_SUCCESS) {
+            last_error_ = "创建粒子描述符池失败";
+            return false;
+        }
+
+        std::array<VkDescriptorSetLayout, kFramesInFlight> layouts{};
+        layouts.fill(impl_->particle_set_layout);
+        VkDescriptorSetAllocateInfo allocate{};
+        allocate.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocate.descriptorPool = impl_->particle_descriptor_pool;
+        allocate.descriptorSetCount = kFramesInFlight;
+        allocate.pSetLayouts = layouts.data();
+        if (vkAllocateDescriptorSets(info.device, &allocate, impl_->particle_sets.data()) !=
+            VK_SUCCESS) {
+            last_error_ = "分配粒子描述符集失败";
+            return false;
+        }
+
+        // binding 0（UBO，按 slot 各一份）与 binding 1（LUT）现在写定；binding 2 待上传后补
+        for (std::uint32_t slot = 0; slot < kFramesInFlight; ++slot) {
+            const VkDescriptorBufferInfo sim_slot{impl_->sim_buffers[slot], 0, sizeof(SimParams)};
+            const VkDescriptorImageInfo lut_info{impl_->lut_sampler, impl_->lut_view,
+                                                 VK_IMAGE_LAYOUT_GENERAL};
+            VkWriteDescriptorSet writes[2]{};
+            writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[0].dstSet = impl_->particle_sets[slot];
+            writes[0].dstBinding = 0;
+            writes[0].descriptorCount = 1;
+            writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            writes[0].pBufferInfo = &sim_slot;
+            writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[1].dstSet = impl_->particle_sets[slot];
+            writes[1].dstBinding = 1;
+            writes[1].descriptorCount = 1;
+            writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[1].pImageInfo = &lut_info;
+            vkUpdateDescriptorSets(info.device, 2, writes, 0, nullptr);
+        }
+
+        // 粒子管线布局（compute 与 point 两种 bind point 共用）
+        VkPipelineLayoutCreateInfo pipeline_layout_info{};
+        pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipeline_layout_info.setLayoutCount = 1;
+        pipeline_layout_info.pSetLayouts = &impl_->particle_set_layout;
+        if (vkCreatePipelineLayout(info.device, &pipeline_layout_info, nullptr,
+                                   &impl_->particle_pipeline_layout) != VK_SUCCESS) {
+            last_error_ = "创建粒子管线布局失败";
+            return false;
+        }
+    }
+
     // ---- 4 条 graphics pipeline ----
     {
         VkPipelineShaderStageCreateInfo stages[2]{};
@@ -809,6 +1136,108 @@ bool RaymarchChain::init(const ChainInitInfo& info) {
         }
     }
 
+    // ---- 粒子 compute + point 管线（T1.8.1）----
+    if (impl_->particle_ready) {
+        // compute（leapfrog KDK 积分一步）
+        VkComputePipelineCreateInfo compute_create{};
+        compute_create.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        compute_create.stage = {
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
+            VK_SHADER_STAGE_COMPUTE_BIT, impl_->compute_module, "main", nullptr};
+        compute_create.layout = impl_->particle_pipeline_layout;
+        if (vkCreateComputePipelines(info.device, VK_NULL_HANDLE, 1, &compute_create, nullptr,
+                                     &impl_->compute_pipeline) != VK_SUCCESS) {
+            std::fprintf(stderr, "[vk] 粒子 compute 管线创建失败（主链不受影响）\n");
+            impl_->particle_ready = false;
+        }
+
+        // point（点精灵 vertex pulling + 加色混合进 HDR；与 GL 的 GL_ONE/GL_ONE 对齐）
+        if (impl_->particle_ready) {
+            VkPipelineShaderStageCreateInfo point_stages[2]{};
+            point_stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            point_stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+            point_stages[0].module = impl_->point_vertex_module;
+            point_stages[0].pName = "main";
+            point_stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            point_stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+            point_stages[1].module = impl_->point_fragment_module;
+            point_stages[1].pName = "main";
+
+            VkPipelineVertexInputStateCreateInfo vertex_input{};
+            vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+            VkPipelineInputAssemblyStateCreateInfo assembly{};
+            assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+            assembly.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+
+            VkPipelineViewportStateCreateInfo viewport{};
+            viewport.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+            viewport.viewportCount = 1;
+            viewport.scissorCount = 1;
+
+            VkPipelineRasterizationStateCreateInfo raster{};
+            raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+            raster.polygonMode = VK_POLYGON_MODE_FILL;
+            raster.cullMode = VK_CULL_MODE_NONE;
+            raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+            raster.lineWidth = 1.0F;
+
+            VkPipelineMultisampleStateCreateInfo multisample{};
+            multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+            multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+            // 加色混合（GL_ONE/GL_ONE），在色调映射前进 HDR（§5.6）
+            VkPipelineColorBlendAttachmentState blend_attachment{};
+            blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            blend_attachment.blendEnable = VK_TRUE;
+            blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.colorBlendOp = VK_BLEND_OP_ADD;
+            blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.alphaBlendOp = VK_BLEND_OP_ADD;
+
+            VkPipelineColorBlendStateCreateInfo blend{};
+            blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            blend.attachmentCount = 1;
+            blend.pAttachments = &blend_attachment;
+
+            const VkDynamicState dynamic_states[] = {VK_DYNAMIC_STATE_VIEWPORT,
+                                                     VK_DYNAMIC_STATE_SCISSOR};
+            VkPipelineDynamicStateCreateInfo dynamic{};
+            dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+            dynamic.dynamicStateCount = 2;
+            dynamic.pDynamicStates = dynamic_states;
+
+            VkGraphicsPipelineCreateInfo create{};
+            create.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+            create.stageCount = 2;
+            create.pStages = point_stages;
+            create.pVertexInputState = &vertex_input;
+            create.pInputAssemblyState = &assembly;
+            create.pViewportState = &viewport;
+            create.pRasterizationState = &raster;
+            create.pMultisampleState = &multisample;
+            create.pColorBlendState = &blend;
+            create.pDynamicState = &dynamic;
+            create.layout = impl_->particle_pipeline_layout;
+            create.renderPass = impl_->point_pass;
+            if (vkCreateGraphicsPipelines(info.device, VK_NULL_HANDLE, 1, &create, nullptr,
+                                          &impl_->point_pipeline) != VK_SUCCESS) {
+                std::fprintf(stderr, "[vk] 粒子 point 管线创建失败（主链不受影响）\n");
+                impl_->particle_ready = false;
+            }
+        }
+
+        if (!impl_->particle_ready) {
+            // 任一管线失败即整条粒子链禁用（资源随 destroy 统一清理）
+            impl_->particle_ready = false;
+        } else {
+            std::printf("[vk] 粒子管线就绪（compute + point）\n");
+        }
+    }
+
     // ---- 读回缓冲（输出分辨率 × 4 通道 × 4 字节，够放半精度或 8 位数据）----
     {
         const VkDeviceSize needed =
@@ -850,6 +1279,97 @@ bool RaymarchChain::init(const ChainInitInfo& info) {
             return false;
         }
         impl_->readback_size = needed;
+    }
+
+    // ---- GPU 计时（timestamp query，T1.7.2）----
+    {
+        // 队列族 timestampValidBits > 0 才能打时间戳（规范不保证图形队列支持）
+        std::uint32_t family_count = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(info.physical_device, &family_count, nullptr);
+        std::vector<VkQueueFamilyProperties> families(family_count);
+        if (family_count > 0) {
+            vkGetPhysicalDeviceQueueFamilyProperties(info.physical_device, &family_count,
+                                                     families.data());
+        }
+        VkQueueFamilyProperties family{};
+        if (info.queue_family < family_count) {
+            family = families[info.queue_family];
+        }
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(info.physical_device, &properties);
+        if (family.timestampValidBits > 0 && properties.limits.timestampPeriod > 0.0F) {
+            VkQueryPoolCreateInfo pool_create{};
+            pool_create.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+            pool_create.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            pool_create.queryCount = 2 * kFramesInFlight;  // 每帧首/尾一对，按 slot 分开
+            if (vkCreateQueryPool(info.device, &pool_create, nullptr, &impl_->timer_pool) ==
+                VK_SUCCESS) {
+                impl_->timer_period_ms =
+                    static_cast<double>(properties.limits.timestampPeriod) / 1e6;
+            } else {
+                std::fprintf(stderr, "[vk] 创建 timestamp query 池失败，GPU 计时不可用\n");
+            }
+        } else {
+            std::fprintf(stderr, "[vk] 该队列不支持 timestamp，GPU 计时不可用（overlay 显示 n/a）\n");
+        }
+    }
+
+    // ---- 平均步数归约资源（T1.7.2：alpha 通道逐级 blit 到 1×1，与 GL 的 mipmap 归约同语义）----
+    {
+        VkFormatProperties format_properties{};
+        vkGetPhysicalDeviceFormatProperties(info.physical_device, VK_FORMAT_R16G16B16A16_SFLOAT,
+                                            &format_properties);
+        const bool blit_ok =
+            (format_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) != 0U &&
+            (format_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) != 0U;
+        if (blit_ok && internal_extent.width > 0 && internal_extent.height > 0) {
+            impl_->reduction_mips = static_cast<std::uint32_t>(
+                                        std::floor(std::log2(static_cast<double>(std::max(
+                                            internal_extent.width, internal_extent.height))))) +
+                                    1;
+            if (impl_->create_image(
+                    internal_extent.width, internal_extent.height, VK_FORMAT_R16G16B16A16_SFLOAT,
+                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                    impl_->reduction_image, impl_->reduction_memory, impl_->reduction_mips)) {
+                impl_->reduction_ready = true;
+                // 首用前过渡 UNDEFINED → GENERAL（全 mip 链）。LUT 上传的 one-shot 在本块
+                // 之前执行（那里它还不存在），故单独提交一次；之后维持 GENERAL 免过渡约定。
+                impl_->submit_one_shot([&](VkCommandBuffer cmd) {
+                    VkImageMemoryBarrier barrier{};
+                    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                    barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    barrier.image = impl_->reduction_image;
+                    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0,
+                                                impl_->reduction_mips, 0, 1};
+                    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+                                         nullptr, 1, &barrier);
+                });
+            } else {
+                std::fprintf(stderr, "[vk] 创建步数归约图像失败，平均步数不可用\n");
+                impl_->reduction_image = VK_NULL_HANDLE;
+            }
+        } else {
+            std::fprintf(stderr, "[vk] 该设备不支持 R16G16B16A16_SFLOAT blit，平均步数不可用\n");
+        }
+        if (impl_->reduction_ready) {
+            // 1×1 RGBA16F 的读回落点（host-visible，永久映射；末级拷出后 host 侧延迟读）
+            if (!impl_->create_buffer(16, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                      impl_->steps_buffer, impl_->steps_memory) ||
+                vkMapMemory(info.device, impl_->steps_memory, 0, 16, 0, &impl_->steps_mapped) !=
+                    VK_SUCCESS) {
+                std::fprintf(stderr, "[vk] 创建步数读回缓冲失败，平均步数不可用\n");
+                impl_->steps_mapped = nullptr;
+                impl_->reduction_ready = false;
+            } else {
+                std::memset(impl_->steps_mapped, 0, 16);
+            }
+        }
     }
 
     // ---- 初始描述符绑定 ----
@@ -963,6 +1483,61 @@ void RaymarchChain::destroy() {
             vkDestroyShaderModule(device, module, nullptr);
         }
         vkDestroyShaderModule(device, impl_->vertex_module, nullptr);
+        // ---- 粒子（T1.8.1）----
+        for (std::uint32_t slot = 0; slot < kFramesInFlight; ++slot) {
+            if (impl_->particle_buffers[slot] != VK_NULL_HANDLE) {
+                vkDestroyBuffer(device, impl_->particle_buffers[slot], nullptr);
+            }
+            if (impl_->particle_memories[slot] != VK_NULL_HANDLE) {
+                vkFreeMemory(device, impl_->particle_memories[slot], nullptr);
+            }
+        }
+        if (impl_->point_pipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, impl_->point_pipeline, nullptr);
+        }
+        if (impl_->compute_pipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, impl_->compute_pipeline, nullptr);
+        }
+        if (impl_->particle_pipeline_layout != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device, impl_->particle_pipeline_layout, nullptr);
+        }
+        if (impl_->particle_descriptor_pool != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device, impl_->particle_descriptor_pool, nullptr);
+        }
+        if (impl_->particle_set_layout != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device, impl_->particle_set_layout, nullptr);
+        }
+        if (impl_->point_pass != VK_NULL_HANDLE) {
+            vkDestroyRenderPass(device, impl_->point_pass, nullptr);
+        }
+        if (impl_->point_fragment_module != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(device, impl_->point_fragment_module, nullptr);
+        }
+        if (impl_->point_vertex_module != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(device, impl_->point_vertex_module, nullptr);
+        }
+        if (impl_->compute_module != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(device, impl_->compute_module, nullptr);
+        }
+        // ---- GPU 统计（T1.7.2）----
+        if (impl_->timer_pool != VK_NULL_HANDLE) {
+            vkDestroyQueryPool(device, impl_->timer_pool, nullptr);
+        }
+        if (impl_->steps_mapped != nullptr) {
+            vkUnmapMemory(device, impl_->steps_memory);
+        }
+        if (impl_->steps_buffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, impl_->steps_buffer, nullptr);
+        }
+        if (impl_->steps_memory != VK_NULL_HANDLE) {
+            vkFreeMemory(device, impl_->steps_memory, nullptr);
+        }
+        if (impl_->reduction_image != VK_NULL_HANDLE) {
+            vkDestroyImage(device, impl_->reduction_image, nullptr);
+        }
+        if (impl_->reduction_memory != VK_NULL_HANDLE) {
+            vkFreeMemory(device, impl_->reduction_memory, nullptr);
+        }
         vkDestroyCommandPool(device, impl_->upload_pool, nullptr);
     }
     delete impl_;
@@ -990,14 +1565,71 @@ void RaymarchChain::upload_uniforms(std::uint32_t frame_slot, const SimParams& s
     std::memcpy(impl_->post_mapped[frame_slot], &post, sizeof(PostParams));
 }
 
-void RaymarchChain::record_offscreen(VkCommandBuffer cmd, std::uint32_t frame_slot, const SimParams&,
-                                     float res_scale, bool fxaa) {
+void RaymarchChain::record_offscreen(VkCommandBuffer cmd, std::uint32_t frame_slot,
+                                     const SimParams& sim, float res_scale, bool fxaa) {
     if (!ready_) {
         return;
     }
     const bool want_resolve = (res_scale > 1.001F) || (res_scale < 0.999F);
     const VkExtent2D output = impl_->info.output_extent;
     const VkExtent2D internal_extent = impl_->info.internal_extent;
+
+    // ---- GPU 计时帧首（T1.7.2）：覆盖 compute → 全部离屏 pass → final（帧尾在 record_final）----
+    if (impl_->timer_period_ms > 0.0) {
+        // 同 slot 上一帧已完成（fence 保证），重置本 slot 的一对 query 合法
+        vkCmdResetQueryPool(cmd, impl_->timer_pool, 2 * frame_slot, 2);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, impl_->timer_pool,
+                            2 * frame_slot);
+    }
+
+    // ---- 粒子 compute（pass 外，T1.8.1）：ensure → （动画开）leapfrog 积分一步 ----
+    const bool particle_enabled = (sim.flags[0] & kFlagParticleEnabled) != 0U;
+    const bool particle_mode = (sim.flags[0] & kFlagParticle) != 0U;
+    if (particle_enabled && impl_->particle_ready) {
+        // count 变化即重建（GL 同语义）；SSBO 双缓冲按 slot 分份，跨提交无读写竞争
+        impl_->upload_particles(
+            static_cast<std::uint32_t>(unpack_float(sim.flags[2])), sim.hole[1], sim.hole[2]);
+        if ((sim.flags[0] & kFlagAnimate) != 0U && impl_->particle_capacity > 0 &&
+            impl_->particle_buffers[frame_slot] != VK_NULL_HANDLE) {
+            // 上传（TRANSFER）或同 slot 上一帧 compute 写 → 本次 compute 读写的内存依赖
+            VkBufferMemoryBarrier ready_barrier{};
+            ready_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            ready_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            ready_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            ready_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            ready_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            ready_barrier.buffer = impl_->particle_buffers[frame_slot];
+            ready_barrier.offset = 0;
+            ready_barrier.size = VK_WHOLE_SIZE;
+            vkCmdPipelineBarrier(cmd,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT |
+                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1,
+                                 &ready_barrier, 0, nullptr);
+
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl_->compute_pipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                    impl_->particle_pipeline_layout, 0, 1,
+                                    &impl_->particle_sets[frame_slot], 0, nullptr);
+            const std::uint32_t groups = (impl_->particle_capacity + 63U) / 64U;
+            vkCmdDispatch(cmd, groups, 1, 1);
+
+            // SSBO 写 → 后续同提交的 compute 读写 + 顶点拉取读
+            VkBufferMemoryBarrier after_barrier{};
+            after_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            after_barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            after_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            after_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            after_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            after_barrier.buffer = impl_->particle_buffers[frame_slot];
+            after_barrier.offset = 0;
+            after_barrier.size = VK_WHOLE_SIZE;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                                 0, 0, nullptr, 1, &after_barrier, 0, nullptr);
+        }
+    }
 
     // 让"上一帧对本图像的写入"对本次使用可见（跨帧的读写依赖由后端提交侧保证）
     auto begin_pass = [&](VkFramebuffer framebuffer, VkExtent2D extent) {
@@ -1020,12 +1652,115 @@ void RaymarchChain::record_offscreen(VkCommandBuffer cmd, std::uint32_t frame_sl
         vkCmdDraw(cmd, 3, 1, 0, 0);
     };
 
-    // ---- pass 1：raymarch → internal ----
+    // ---- pass 1：raymarch → internal（粒子模式 = 清黑跳过，§5.6「独立显示」）----
     begin_pass(impl_->hdr_framebuffers[0], internal_extent);
-    draw_fullscreen(impl_->pipelines[kPassRaymarch],
-                    impl_->sets[kPassRaymarch][frame_slot]);
+    if (particle_mode && particle_enabled && impl_->particle_ready) {
+        // 独立粒子模式：黑背景（与 GL 的 glClear(0,0,0,0) 对齐），alpha 也清零
+        VkClearAttachment clear_color{};
+        clear_color.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        clear_color.colorAttachment = 0;
+        clear_color.clearValue.color = {{0.0F, 0.0F, 0.0F, 0.0F}};
+        VkClearRect clear_rect{{{0, 0}, internal_extent}, 0, 1};
+        vkCmdClearAttachments(cmd, 1, &clear_color, 1, &clear_rect);
+    } else {
+        draw_fullscreen(impl_->pipelines[kPassRaymarch],
+                        impl_->sets[kPassRaymarch][frame_slot]);
+    }
     vkCmdEndRenderPass(cmd);
     impl_->barrier_attachment_to_shader(cmd, impl_->internal_image);
+
+    // ---- 平均步数归约（T1.7.2；raymarch 之后、粒子叠加之前——alpha 未被污染）----
+    // alpha = step_used（raymarch.frag V5.18）；逐级 blit 到 1×1 = 全图平均（GL 的
+    // mipmap 归约同语义），末级拷到 host buffer 延迟读。低频更新（每 15 帧）。
+    if (!particle_mode && impl_->reduction_ready && impl_->steps_mapped != nullptr) {
+        ++impl_->steps_frame_counter;
+        if (impl_->steps_frame_counter >= 15) {
+            impl_->steps_frame_counter = 0;
+            const std::uint32_t w = internal_extent.width;
+            const std::uint32_t h = internal_extent.height;
+
+            // internal 的 attachment 写 → TRANSFER 读
+            VkImageMemoryBarrier to_transfer{};
+            to_transfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            to_transfer.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+            to_transfer.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            to_transfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            to_transfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            to_transfer.image = impl_->internal_image;
+            to_transfer.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            to_transfer.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            to_transfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                                 &to_transfer);
+
+            // mip0：同尺寸 copy（internal → reduction）
+            VkImageCopy copy{};
+            copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            copy.extent = {w, h, 1};
+            vkCmdCopyImage(cmd, impl_->internal_image, VK_IMAGE_LAYOUT_GENERAL,
+                           impl_->reduction_image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+
+            // 逐级 blit（LINEAR 缩半 ≈ box 平均）。同 image 不同 mip level 的 region 不重叠，
+            // 每级之间用 TRANSFER 写后读屏障隔离。
+            for (std::uint32_t level = 1; level < impl_->reduction_mips; ++level) {
+                VkImageBlit blit{};
+                blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level - 1, 0, 1};
+                blit.srcOffsets[1] = {static_cast<std::int32_t>(std::max(1U, w >> (level - 1))),
+                                      static_cast<std::int32_t>(std::max(1U, h >> (level - 1))),
+                                      1};
+                blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1};
+                blit.dstOffsets[1] = {static_cast<std::int32_t>(std::max(1U, w >> level)),
+                                      static_cast<std::int32_t>(std::max(1U, h >> level)), 1};
+                vkCmdBlitImage(cmd, impl_->reduction_image, VK_IMAGE_LAYOUT_GENERAL,
+                               impl_->reduction_image, VK_IMAGE_LAYOUT_GENERAL, 1, &blit,
+                               VK_FILTER_LINEAR);
+                VkImageMemoryBarrier level_barrier{};
+                level_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                level_barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+                level_barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                level_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                level_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                level_barrier.image = impl_->reduction_image;
+                level_barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1};
+                level_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                level_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                                     &level_barrier);
+            }
+
+            // 末级 1×1 → host buffer（RGBA16F 的第 4 通道 = 平均 alpha = 平均步数）
+            VkBufferImageCopy region{};
+            region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, impl_->reduction_mips - 1, 0, 1};
+            region.imageExtent = {1, 1, 1};
+            vkCmdCopyImageToBuffer(cmd, impl_->reduction_image, VK_IMAGE_LAYOUT_GENERAL,
+                                   impl_->steps_buffer, 1, &region);
+        }
+    }
+
+    // ---- pass 1.5：粒子点精灵（T1.8.1）——画进 internal HDR，与 GL 的 draw_particles 同位----
+    if (particle_enabled && impl_->particle_ready && impl_->particle_capacity > 0) {
+        VkRenderPassBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        begin.renderPass = impl_->point_pass;  // loadOp=LOAD：保留 raymarch 输出做加色
+        begin.framebuffer = impl_->hdr_framebuffers[0];
+        begin.renderArea = {{0, 0}, internal_extent};
+        vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
+        VkViewport viewport{0.0F, 0.0F, static_cast<float>(internal_extent.width),
+                            static_cast<float>(internal_extent.height), 0.0F, 1.0F};
+        VkRect2D scissor{{0, 0}, internal_extent};
+        vkCmdSetViewport(cmd, 0, 1, &viewport);
+        vkCmdSetScissor(cmd, 0, 1, &scissor);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, impl_->point_pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                impl_->particle_pipeline_layout, 0, 1,
+                                &impl_->particle_sets[frame_slot], 0, nullptr);
+        vkCmdDraw(cmd, impl_->particle_capacity, 1, 0, 0);
+        vkCmdEndRenderPass(cmd);
+        impl_->barrier_attachment_to_shader(cmd, impl_->internal_image);
+    }
 
     // 后续 pass 的输入纹理
     VkImage source_image = impl_->internal_image;
@@ -1131,6 +1866,12 @@ void RaymarchChain::record_final(VkCommandBuffer cmd, std::uint32_t frame_slot, 
     barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+    // GPU 计时帧尾（与 record_offscreen 帧首配对；呈现 blit 不计入——与 GL 的计时口径一致）
+    if (impl_->timer_period_ms > 0.0) {
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, impl_->timer_pool,
+                            2 * frame_slot + 1);
+    }
 }
 
 void RaymarchChain::record_present(VkCommandBuffer cmd, VkImage dst_image, VkExtent2D dst_extent) {
@@ -1280,6 +2021,57 @@ bool RaymarchChain::read_ldr(std::vector<unsigned char>& out, int& width, int& h
         }
     }
     return true;
+}
+
+// ---------------------------------------------------------------- 监控数据（T1.7.2）
+
+bool RaymarchChain::internal_extent(std::uint32_t& width, std::uint32_t& height) const {
+    if (impl_ == nullptr || !ready_) {
+        return false;
+    }
+    width = impl_->info.internal_extent.width;
+    height = impl_->info.internal_extent.height;
+    return true;
+}
+
+double RaymarchChain::gpu_frame_ms() const {
+    if (impl_ == nullptr || !ready_ || impl_->timer_period_ms <= 0.0 ||
+        impl_->timer_pool == VK_NULL_HANDLE) {
+        return -1.0;
+    }
+    // 非阻塞轮询两个 slot 的（首，尾）时间戳对：fence 已等待完成的 slot 结果必然就绪，
+    // 另一个 slot 保持 NOT_READY 就跳过。缓存最近一次成功读到的帧耗时。
+    double latest = -1.0;
+    for (std::uint32_t slot = 0; slot < kFramesInFlight; ++slot) {
+        std::uint64_t stamps[2] = {0, 0};
+        const VkResult r = vkGetQueryPoolResults(impl_->info.device, impl_->timer_pool,
+                                                 2 * slot, 2, sizeof(stamps), stamps,
+                                                 sizeof(std::uint64_t),
+                                                 VK_QUERY_RESULT_64_BIT);
+        if (r == VK_SUCCESS && stamps[1] >= stamps[0]) {
+            latest = static_cast<double>(stamps[1] - stamps[0]) * impl_->timer_period_ms;
+        }
+    }
+    if (latest > 0.0) {
+        impl_->gpu_ms_cache = latest;
+    }
+    return impl_->gpu_ms_cache;
+}
+
+double RaymarchChain::last_avg_steps() const {
+    if (impl_ == nullptr || !ready_ || !impl_->reduction_ready ||
+        impl_->steps_mapped == nullptr) {
+        return -1.0;
+    }
+    // 读 host buffer 的 alpha（RGBA16F 第 4 通道，byte offset 6）。拷贝是异步的——读到的
+    // 可能是上一轮归约的结果；步数 ≥ 1 恒为正 half，读到 0 = 尚无数据。
+    std::uint16_t raw = 0;
+    std::memcpy(&raw, static_cast<const std::uint8_t*>(impl_->steps_mapped) + 6, sizeof(raw));
+    const float value = half_to_float(raw);
+    if (value > 0.0F) {
+        impl_->avg_steps_cache = value;
+    }
+    return impl_->avg_steps_cache;
 }
 
 }  // namespace ehe::render::vk

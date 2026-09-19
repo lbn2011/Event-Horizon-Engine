@@ -396,6 +396,25 @@ public:
         return chain_.read_hdr(rgb, width, height);
     }
 
+    // ---------------------------------------------------------------- 监控 overlay（T1.7.2）
+
+    void render_resolution(int& width, int& height) const override {
+        std::uint32_t internal_w = 0;
+        std::uint32_t internal_h = 0;
+        if (chain_.internal_extent(internal_w, internal_h)) {
+            width = static_cast<int>(internal_w);
+            height = static_cast<int>(internal_h);
+        } else {
+            // 链未就绪：退化为请求分辨率或窗口尺寸
+            width = (render_width_ > 0) ? render_width_ : width_;
+            height = (render_height_ > 0) ? render_height_ : height_;
+        }
+    }
+
+    double gpu_frame_ms() const override { return chain_.gpu_frame_ms(); }
+
+    double last_avg_steps() const override { return chain_.last_avg_steps(); }
+
 private:
     // ---------------------------------------------------------------- 初始化分步
 

@@ -17,6 +17,7 @@ add_library(ehe_core STATIC
   src/sha256.cpp
   src/image_io.cpp
   src/noise.cpp
+  src/particles.cpp
   src/console.cpp
   src/tonemap.cpp
 )

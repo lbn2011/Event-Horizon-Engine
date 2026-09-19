@@ -21,6 +21,7 @@ add_executable(ehe_tests
   src/test_noise.cpp
   src/test_tonemap.cpp
   src/test_spirv.cpp
+  src/test_particles.cpp
 )
 
 target_link_libraries(ehe_tests
